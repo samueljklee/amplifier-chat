@@ -4,11 +4,15 @@ from fastapi.testclient import TestClient
 from chat_plugin import create_router
 
 
+class MockSettings:
+    sessions_dir = None
+
+
 class MockState:
     session_manager = None
     event_bus = None
     bundle_registry = None
-    settings = None
+    settings = MockSettings()
 
 
 @pytest.fixture

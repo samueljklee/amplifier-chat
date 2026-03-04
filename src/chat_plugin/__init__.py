@@ -12,6 +12,7 @@ def create_router(state: Any) -> APIRouter:
     from chat_plugin.pin_storage import PinStorage
     from chat_plugin.routes import (
         create_command_routes,
+        create_history_routes,
         create_pin_routes,
         create_static_routes,
     )
@@ -23,6 +24,11 @@ def create_router(state: Any) -> APIRouter:
         session_manager=state.session_manager, event_bus=state.event_bus
     )
 
+    # Extract sessions_dir from amplifierd settings (may be None)
+    sessions_dir = getattr(
+        getattr(state, "settings", None), "sessions_dir", None
+    )
+
     router = APIRouter()
 
     @router.get("/chat/health", tags=["chat"])
@@ -30,6 +36,7 @@ def create_router(state: Any) -> APIRouter:
         return {"status": "ok", "plugin": "chat"}
 
     router.include_router(create_pin_routes(pin_storage))
+    router.include_router(create_history_routes(sessions_dir, pin_storage))
     router.include_router(create_command_routes(processor))
     router.include_router(create_static_routes())
     return router

@@ -32,3 +32,29 @@ def test_persistence_across_instances(tmp_path):
     PinStorage(path).add("session-1")
     store2 = PinStorage(path)
     assert "session-1" in store2.list_pins()
+
+
+def test_pin_records_timestamp(tmp_path):
+    store = PinStorage(tmp_path / "pins.json")
+    store.add("session-1")
+    ts = store.get_pins_with_timestamps()
+    assert "session-1" in ts
+    assert ts["session-1"] != ""  # ISO timestamp present
+
+
+def test_unpin_removes_timestamp(tmp_path):
+    store = PinStorage(tmp_path / "pins.json")
+    store.add("session-1")
+    store.remove("session-1")
+    ts = store.get_pins_with_timestamps()
+    assert "session-1" not in ts
+
+
+def test_backward_compat_old_format(tmp_path):
+    """Old pin files without pinned_at should still load."""
+    path = tmp_path / "pins.json"
+    path.write_text('{"pinned": ["session-old"]}', encoding="utf-8")
+    store = PinStorage(path)
+    assert "session-old" in store.list_pins()
+    ts = store.get_pins_with_timestamps()
+    assert ts["session-old"] == ""  # no timestamp for old entries

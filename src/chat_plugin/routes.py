@@ -1,13 +1,36 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from chat_plugin.commands import CommandProcessor
 from chat_plugin.pin_storage import PinStorage
+from chat_plugin.session_history import scan_session_revisions, scan_sessions
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+_VALID_SESSION_ID = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+
+def _parse_session_id_set(values: list[str]) -> set[str]:
+    """Validate session IDs and return a de-duplicated set."""
+    out: set[str] = set()
+    for raw in values:
+        session_id = (raw or "").strip()
+        if not session_id:
+            continue
+        if not _VALID_SESSION_ID.fullmatch(session_id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid session ID format: {session_id!r}",
+            )
+        out.add(session_id)
+    return out
 
 
 def create_pin_routes(pin_storage: PinStorage) -> APIRouter:
@@ -26,6 +49,162 @@ def create_pin_routes(pin_storage: PinStorage) -> APIRouter:
     async def unpin_session(session_id: str):
         pin_storage.remove(session_id)
         return {"pinned": False, "session_id": session_id}
+
+    # Distro-compatible paths under /chat/api/sessions/
+    @router.get("/api/sessions/pins")
+    async def list_pins_api():
+        return {"pinned": sorted(pin_storage.list_pins())}
+
+    @router.post("/api/sessions/{session_id}/pin")
+    async def pin_session_api(session_id: str):
+        if not _VALID_SESSION_ID.fullmatch(session_id):
+            raise HTTPException(status_code=400, detail="Invalid session ID")
+        pin_storage.add(session_id)
+        return {"status": "pinned", "session_id": session_id}
+
+    @router.delete("/api/sessions/{session_id}/pin")
+    async def unpin_session_api(session_id: str):
+        if not _VALID_SESSION_ID.fullmatch(session_id):
+            raise HTTPException(status_code=400, detail="Invalid session ID")
+        pin_storage.remove(session_id)
+        return {"status": "unpinned", "session_id": session_id}
+
+    return router
+
+
+def create_history_routes(
+    sessions_dir: Path | None,
+    pin_storage: PinStorage,
+) -> APIRouter:
+    router = APIRouter(prefix="/chat", tags=["chat-history"])
+
+    @router.get("/api/sessions/history")
+    async def list_session_history(
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> dict:
+        """Return lightweight metadata for all sessions discovered on disk."""
+        sessions = await asyncio.to_thread(scan_sessions, sessions_dir)
+        pinned_ids = pin_storage.list_pins()
+
+        # Filter: only include sessions with actual content
+        sessions = [
+            row
+            for row in sessions
+            if (row.get("message_count") or 0) > 0
+            or row.get("last_user_message")
+        ]
+        for row in sessions:
+            row["pinned"] = row["session_id"] in pinned_ids
+
+        return {"sessions": sessions[:limit]}
+
+    @router.get("/api/sessions/revisions")
+    async def list_session_revisions(
+        limit: int = Query(default=300, ge=1, le=5000),
+        session_ids: str | None = Query(default=None, max_length=20000),
+    ) -> dict:
+        """Return revision signatures for disk-backed sessions (legacy GET)."""
+        wanted: set[str] | None = None
+        if session_ids:
+            wanted = _parse_session_id_set(session_ids.split(","))
+
+        rows = await asyncio.to_thread(
+            scan_session_revisions, sessions_dir, wanted
+        )
+        return {"sessions": rows[:limit]}
+
+    @router.post("/api/sessions/revisions")
+    async def diff_session_revisions(request: Request) -> dict:
+        """Return only changed/removed revisions vs client-known state."""
+        raw = await request.body()
+        if not raw:
+            body: dict[str, Any] = {}
+        else:
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Request body must be valid JSON",
+                ) from exc
+            if not isinstance(body, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Request body must be a JSON object",
+                )
+
+        raw_ids = body.get("session_ids")
+        if raw_ids is None:
+            wanted: set[str] | None = None
+        elif isinstance(raw_ids, list):
+            if not all(isinstance(v, str) for v in raw_ids):
+                raise HTTPException(
+                    status_code=400,
+                    detail="'session_ids' must be a list of strings",
+                )
+            wanted = _parse_session_id_set(raw_ids)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="'session_ids' must be a list of strings",
+            )
+
+        raw_known = body.get("known_revisions")
+        known_revisions: dict[str, str | None] = {}
+        if raw_known is not None:
+            if not isinstance(raw_known, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="'known_revisions' must be an object",
+                )
+            for raw_sid, raw_rev in raw_known.items():
+                if not isinstance(raw_sid, str):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="'known_revisions' keys must be strings",
+                    )
+                ids = _parse_session_id_set([raw_sid])
+                if not ids:
+                    continue
+                sid = next(iter(ids))
+                if raw_rev is not None and not isinstance(raw_rev, str):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="'known_revisions' values must be strings or null",
+                    )
+                known_revisions[sid] = raw_rev
+
+        if wanted is None and known_revisions:
+            wanted = set(known_revisions.keys())
+
+        limit = body.get("limit", 300)
+        if not isinstance(limit, int) or limit < 1 or limit > 5000:
+            raise HTTPException(
+                status_code=400,
+                detail="'limit' must be an integer between 1 and 5000",
+            )
+
+        rows = await asyncio.to_thread(
+            scan_session_revisions, sessions_dir, wanted
+        )
+        found_ids = {row["session_id"] for row in rows}
+
+        changed: list[dict[str, str]] = []
+        for row in rows:
+            sid = row["session_id"]
+            known = known_revisions.get(sid)
+            if sid not in known_revisions or known != row["revision"]:
+                changed.append(row)
+                if len(changed) >= limit:
+                    break
+
+        removed: list[str] = []
+        if wanted is not None:
+            removed = sorted(
+                sid for sid in wanted if sid not in found_ids
+            )[:limit]
+
+        return {"changed": changed, "removed": removed}
 
     return router
 

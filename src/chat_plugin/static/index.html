@@ -1328,14 +1328,26 @@
       });
     },
     async listPins() {
-      const resp = await fetch(`${API_BASE}/chat/pins`);
+      const resp = await fetch(`${API_BASE}/chat/api/sessions/pins`);
       return resp.json();
     },
     async pinSession(sessionId) {
-      return fetch(`${API_BASE}/chat/pins/${sessionId}`, { method: 'POST' });
+      return fetch(`${API_BASE}/chat/api/sessions/${sessionId}/pin`, { method: 'POST' });
     },
     async unpinSession(sessionId) {
-      return fetch(`${API_BASE}/chat/pins/${sessionId}`, { method: 'DELETE' });
+      return fetch(`${API_BASE}/chat/api/sessions/${sessionId}/pin`, { method: 'DELETE' });
+    },
+    async listSessionHistory(limit = 300) {
+      const resp = await fetch(`${API_BASE}/chat/api/sessions/history?limit=${limit}`);
+      return resp.json();
+    },
+    async getSessionRevisions(payload) {
+      const resp = await fetch(`${API_BASE}/chat/api/sessions/revisions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      return resp.json();
     },
   };
 
@@ -1343,13 +1355,13 @@
   // SSE events arrive as TransportEvent envelopes:
   // { event, data, session_id, timestamp, correlation_id, sequence }
   // The inner `data` field is the actual event payload.
-  // Map SSE event names → legacy WS message `type` values so the existing
+  // Map SSE event names to legacy WS message `type` values so the existing
   // handleWsMessage switch statement works without a full rewrite.
   const SSE_EVENT_TYPE_MAP = {
     'content_block:start':   'content_start',
     'content_block:delta':   'content_delta',
     'content_block:end':     'content_end',
-    'thinking:start':        'content_start',   // treat as content_start for thinking block_type
+    'thinking:start':        'content_start',
     'thinking:delta':        'thinking_delta',
     'thinking:end':          'thinking_final',
     'tool:pre':              'tool_call',
@@ -2642,6 +2654,7 @@
     // Accumulates token usage across LLM calls within a single turn
     const turnTokensRef = useRef(null);
     const placeholderIdRef = useRef(null);
+    const revisionPollInFlightRef = useRef(false);
     const historySyncInFlightRef = useRef(false);
     const historyDiscoverInFlightRef = useRef(false);
     const transcriptFetchAbortRef = useRef(null);
@@ -3350,6 +3363,7 @@
           setSseStatus('connected');
         }
         setSessions(prev => {
+          if (!sessionKey) return prev;
           const next = new Map(prev);
           const s = next.get(sessionKey) || {};
           next.set(sessionKey, { ...s, sse, cwd: s.cwd || requestedCwd });
@@ -3365,21 +3379,24 @@
       if (historyDiscoverInFlightRef.current || historySyncInFlightRef.current) return;
       historyDiscoverInFlightRef.current = true;
 
-      api.listSessions()
+      api.listSessionHistory()
         .then(data => {
-          const rows = Array.isArray(data?.sessions) ? data.sessions
-            : Array.isArray(data) ? data : [];
+          const rows = Array.isArray(data?.sessions) ? data.sessions : [];
           if (!rows.length) {
             setPendingHistorySyncCount(0);
             return;
           }
+
           const knownSessionIds = new Set();
           for (const session of sessionsRef.current.values()) {
             if (session && session.sessionId) knownSessionIds.add(session.sessionId);
           }
+
           let pending = 0;
-          for (const s of rows) {
+          for (const s of rows.slice(0, 300)) {
             if (!s || !s.session_id) continue;
+            const messageCount = Number(s.message_count) || 0;
+            if (messageCount <= 0 && !s.last_user_message) continue;
             if (!knownSessionIds.has(s.session_id)) pending += 1;
           }
           setPendingHistorySyncCount(pending);
@@ -3398,12 +3415,13 @@
       historySyncInFlightRef.current = true;
       if (!silent) setSyncingHistory(true);
 
-      Promise.all([api.listSessions(), api.listPins()])
-        .then(([sessionData, pinsData]) => {
-          const rows = Array.isArray(sessionData?.sessions) ? sessionData.sessions
-            : Array.isArray(sessionData) ? sessionData : [];
-          const pinnedSet = new Set((pinsData && pinsData.pinned) || []);
-          setPinnedSessionIds(pinnedSet);
+      api.listSessionHistory()
+        .then(data => {
+          const rows = Array.isArray(data?.sessions) ? data.sessions : [];
+          if (!rows.length) {
+            setPendingHistorySyncCount(0);
+            return;
+          }
 
           setSessions(prev => {
             const next = new Map(prev);
@@ -3415,33 +3433,58 @@
             }
 
             let changed = false;
-            for (const s of rows) {
+            for (const s of rows.slice(0, 300)) {
               if (!s || !s.session_id) continue;
-              const sessionId = s.session_id;
-              const existingKey = sessionKeyById.get(sessionId);
+              const messageCount = Number(s.message_count) || 0;
+              if (messageCount <= 0 && !s.last_user_message) continue;
 
-              // Use working_dir from amplifierd REST response; fall back to cwd field
-              const cwd = s.working_dir || s.cwd || '~';
-              const lastUpdated = s.last_updated || s.created_at || null;
+              const sessionId = s.session_id;
+              const revision = typeof s.revision === 'string' ? s.revision : null;
+              const parentSessionId = normalizeSessionParentId(
+                s.parent_session_id || sessionParentByIdRef.current[sessionId]
+              );
+              const spawnAgent = (
+                (typeof s.spawn_agent === 'string' && s.spawn_agent)
+                || childAgentRef.current[sessionId]
+                || null
+              );
+              if (parentSessionId) {
+                sessionParentByIdRef.current[sessionId] = parentSessionId;
+              }
+              if (spawnAgent) {
+                childAgentRef.current[sessionId] = spawnAgent;
+              }
+              const existingKey = sessionKeyById.get(sessionId);
 
               if (!existingKey) {
                 const historyKey = 'history-' + sessionId;
                 if (next.has(historyKey)) continue;
-                const badgeNew = !silent;
+                // New session never seen by this client.
+                // Only badge on explicit user-initiated sync (!silent) — not on
+                // initial page load or background refresh, which would flag every
+                // historical session as "New" after a server restart.
+                const hasContent = messageCount > 0;
+                const badgeNew = !silent && hasContent;
                 next.set(historyKey, {
                   source: 'history',
                   status: 'history',
                   sessionId,
-                  cwd,
-                  turnCount: 0,
-                  savedTurnCount: 0,
-                  messageCount: 0,
-                  lastUserMessage: null,
-                  lastUpdated,
+                  cwd: s.cwd || '~',
+                  turnCount: messageCount,
+                  savedTurnCount: messageCount,
+                  messageCount,
+                  lastUserMessage: s.last_user_message || null,
+                  lastUpdated: s.last_updated || null,
+                  name: s.name || null,
+                  description: s.description || null,
+                  knownRevision: badgeNew ? null : revision,
+                  remoteRevision: revision,
                   hasExternalUpdate: badgeNew,
                   isNewSession: badgeNew,
-                  parentSessionId: null,
-                  spawnAgent: null,
+                  parentSessionId,
+                  spawnAgent,
+                  name: s.name || null,
+                  description: s.description || null,
                 });
                 sessionKeyById.set(sessionId, historyKey);
                 changed = true;
@@ -3449,21 +3492,84 @@
               }
 
               const cur = next.get(existingKey) || {};
-              const treatAsHistory = cur.source === 'history' || !cur.sse;
-              const nextStatus = treatAsHistory ? 'history' : cur.status;
-              const nextCwd = cwd || cur.cwd || '~';
-              const nextLastUpdated = lastUpdated || cur.lastUpdated || null;
+              const remoteRevision = revision ?? cur.remoteRevision ?? null;
+              const knownRevision = cur.knownRevision == null ? remoteRevision : cur.knownRevision;
+              const hasExternalUpdate = !!cur.hasExternalUpdate
+                || (
+                  knownRevision != null
+                  && remoteRevision != null
+                  && knownRevision !== remoteRevision
+                );
 
-              const rowChanged = nextCwd !== cur.cwd || nextLastUpdated !== cur.lastUpdated
-                || nextStatus !== cur.status;
+              const treatAsHistory = cur.source === 'history' || !cur.sse;
+              const nextSource = treatAsHistory ? 'history' : cur.source;
+              const nextStatus = treatAsHistory
+                ? ((cur.status && cur.status !== 'history') ? cur.status : 'history')
+                : cur.status;
+              const nextTurnCount = (
+                treatAsHistory && (cur.status === 'history' || cur.source === 'history')
+              )
+                ? (messageCount || cur.turnCount || 0)
+                : cur.turnCount;
+              const nextSavedTurnCount = (
+                treatAsHistory && (cur.status === 'history' || cur.source === 'history')
+              )
+                ? (messageCount || cur.savedTurnCount || cur.turnCount || 0)
+                : cur.savedTurnCount;
+              const nextMessageCount = messageCount || cur.messageCount || cur.turnCount || 0;
+              const nextCwd = s.cwd || cur.cwd || '~';
+              const nextLastUserMessage = s.last_user_message || cur.lastUserMessage || null;
+              const nextLastUpdated = s.last_updated || cur.lastUpdated || null;
+              const nextParentSessionId = parentSessionId || cur.parentSessionId || null;
+              const nextSpawnAgent = spawnAgent || cur.spawnAgent || null;
+              const nextName = s.name || cur.name || null;
+              const nextDescription = s.description || cur.description || null;
+
+              const rowChanged =
+                nextCwd !== cur.cwd
+                || nextMessageCount !== cur.messageCount
+                || nextLastUserMessage !== cur.lastUserMessage
+                || nextLastUpdated !== cur.lastUpdated
+                || remoteRevision !== cur.remoteRevision
+                || knownRevision !== cur.knownRevision
+                || hasExternalUpdate !== !!cur.hasExternalUpdate
+                || nextSource !== cur.source
+                || nextStatus !== cur.status
+                || nextTurnCount !== cur.turnCount
+                || nextSavedTurnCount !== cur.savedTurnCount
+                || nextParentSessionId !== cur.parentSessionId
+                || nextSpawnAgent !== cur.spawnAgent
+                || nextName !== cur.name
+                || nextDescription !== cur.description;
+
               if (!rowChanged) continue;
 
-              next.set(existingKey, { ...cur, cwd: nextCwd, lastUpdated: nextLastUpdated, status: nextStatus });
+              next.set(existingKey, {
+                ...cur,
+                source: nextSource,
+                status: nextStatus,
+                cwd: nextCwd,
+                turnCount: nextTurnCount,
+                savedTurnCount: nextSavedTurnCount,
+                messageCount: nextMessageCount,
+                lastUserMessage: nextLastUserMessage,
+                lastUpdated: nextLastUpdated,
+                knownRevision,
+                remoteRevision,
+                hasExternalUpdate,
+                parentSessionId: nextParentSessionId,
+                spawnAgent: nextSpawnAgent,
+                name: nextName,
+                description: nextDescription,
+              });
               changed = true;
             }
+
             return changed ? next : prev;
           });
           setPendingHistorySyncCount(0);
+          // Load pin state from server
+          fetchPinnedSessions().then(pinSet => setPinnedSessionIds(pinSet));
         })
         .catch(err => {
           console.warn('[chat] failed to load session history', err);
@@ -3719,13 +3825,10 @@
       const nowIso = new Date().toISOString();
       setSessions(prev => {
         const next = new Map(prev);
+        const key = activeKeyRef.current;
         if (key && next.has(key)) {
           const s = next.get(key);
-          next.set(key, {
-            ...s, status: 'running',
-            lastUserMessage: content || s.lastUserMessage || null,
-            lastUpdated: nowIso,
-          });
+          next.set(key, { ...s, status: 'running', lastUserMessage: content || s.lastUserMessage || null, lastUpdated: nowIso });
         }
         return next;
       });
@@ -3939,6 +4042,9 @@
           const items = transcriptToChronoItems(transcript);
           const messageCount = countTranscriptMessages(transcript);
           const restoredTurns = messageCount || target.savedTurnCount || target.turnCount || 0;
+          const revision = typeof data?.revision === 'string'
+            ? data.revision
+            : (target.remoteRevision || target.knownRevision || null);
           const lastUserMessage = extractLastUserMessage(transcript) || target.lastUserMessage || null;
           setSessions(prev => {
             const next = new Map(prev);
@@ -3951,6 +4057,8 @@
               messageCount: messageCount || restoredTurns,
               lastUserMessage,
               lastUpdated: data?.last_updated || cur.lastUpdated || null,
+              knownRevision: revision,
+              remoteRevision: revision,
               hasExternalUpdate: false,
               isNewSession: false,
               status: 'connecting',
@@ -4045,6 +4153,9 @@
           const messageCount = countTranscriptMessages(transcript);
           const nextTurns = messageCount || target.savedTurnCount || target.turnCount || 0;
           const nextCount = Number(messageCount || nextTurns || 0);
+          const revision = typeof data?.revision === 'string'
+            ? data.revision
+            : (target.remoteRevision || target.knownRevision || null);
           const lastUserMessage = extractLastUserMessage(transcript) || target.lastUserMessage || null;
           if (activeOnly && activeKeyRef.current !== key) return;
 
@@ -4059,6 +4170,8 @@
               messageCount: messageCount || nextTurns,
               lastUserMessage,
               lastUpdated: data?.last_updated || cur.lastUpdated || null,
+              knownRevision: revision,
+              remoteRevision: revision,
               hasExternalUpdate: false,
               isNewSession: false,
             });
@@ -4077,12 +4190,15 @@
           }
         })
         .catch(err => {
-          console.warn('[chat] failed to refresh session', err);
+          console.warn('[chat] failed to refresh session from disk', err);
           if (activeKeyRef.current !== key) return;
           setChronoItems(prev => [...prev, {
-            id: makeId(), type: 'text', role: 'system',
-            content: 'Warning: Could not refresh this session.',
-            streaming: false, order: orderCounterRef.current++,
+            id: makeId(),
+            type: 'text',
+            role: 'system',
+            content: 'Warning: Could not refresh this session from disk.',
+            streaming: false,
+            order: orderCounterRef.current++,
           }]);
         })
         .finally(() => {
@@ -4129,7 +4245,6 @@
       placeholderIdRef.current = null;
       setSessionId(target.sessionId || null);
       setCwd(target.cwd || '~');
-      // SSE: update active ref; EventSource manages its own connection
       if (target.sse) {
         sseRef.current = target.sse;
         setSseStatus('connected');
@@ -4152,7 +4267,136 @@
       }
     }, [sessions, handleWsMessage, resumeHistorySession]);
 
-    // pollSessionRevisions removed: amplifierd SSE handles session state updates
+    const pollSessionRevisions = useCallback(() => {
+      if (revisionPollInFlightRef.current) return;
+
+      const ids = [];
+      const seen = new Set();
+      const knownRevisions = {};
+      const activeSession = activeKeyRef.current
+        ? sessionsRef.current.get(activeKeyRef.current)
+        : null;
+      const activeSessionId = (activeSession && activeSession.sessionId) || null;
+      for (const session of sessionsRef.current.values()) {
+        if (!session || !session.sessionId) continue;
+        if (seen.has(session.sessionId)) continue;
+        const isActiveSessionId = activeSessionId && session.sessionId === activeSessionId;
+        const sse = session.sse;
+        if (sse && !isActiveSessionId) {
+          continue;
+        }
+        seen.add(session.sessionId);
+        ids.push(session.sessionId);
+        knownRevisions[session.sessionId] = typeof session.knownRevision === 'string'
+          ? session.knownRevision
+          : null;
+      }
+      if (ids.length === 0) return;
+
+      revisionPollInFlightRef.current = true;
+      const payload = {
+        limit: Math.max(300, ids.length + 20),
+        session_ids: ids,
+        known_revisions: knownRevisions,
+      };
+
+      api.getSessionRevisions(payload)
+        .then(data => {
+          const rows = Array.isArray(data?.changed) ? data.changed : [];
+          const removed = Array.isArray(data?.removed) ? data.removed : [];
+          if (!rows.length && !removed.length) return;
+          const byId = new Map(
+            rows
+              .filter(r => r && typeof r.session_id === 'string')
+              .map(r => [r.session_id, r])
+          );
+          const removedIds = new Set(
+            removed.filter(v => typeof v === 'string')
+          );
+
+          setSessions(prev => {
+            let changed = false;
+            const next = new Map(prev);
+            for (const [key, session] of next.entries()) {
+              if (!session || !session.sessionId) continue;
+
+              if (removedIds.has(session.sessionId)) {
+                if (session.remoteRevision === null) continue;
+                next.set(key, {
+                  ...session,
+                  remoteRevision: null,
+                });
+                changed = true;
+                continue;
+              }
+
+              const row = byId.get(session.sessionId);
+              if (!row || typeof row.revision !== 'string') continue;
+
+              const remoteRevision = row.revision;
+              const currentKnown = session.knownRevision ?? null;
+              // Never advance knownRevision in the poll — null means "never reviewed
+              // by this client". Only set a baseline when the user opens the session.
+              const nextKnown = currentKnown;
+              const hasExternalUpdate = currentKnown === null
+                ? (remoteRevision !== null)   // never reviewed: badge if has content
+                : currentKnown !== remoteRevision; // reviewed before: badge if changed
+              const nextUpdatedAt = row.last_updated || session.lastUpdated || null;
+              // Pick up name/description from revision scan (written by naming hook)
+              const nextName = row.name || session.name || null;
+              const nextDescription = row.description || session.description || null;
+
+              if (
+                session.remoteRevision === remoteRevision
+                && session.knownRevision === nextKnown
+                && !!session.hasExternalUpdate === hasExternalUpdate
+                && session.lastUpdated === nextUpdatedAt
+                && session.name === nextName
+                && session.description === nextDescription
+              ) {
+                continue;
+              }
+
+              next.set(key, {
+                ...session,
+                remoteRevision,
+                knownRevision: nextKnown,
+                hasExternalUpdate,
+                lastUpdated: nextUpdatedAt,
+                name: nextName,
+                description: nextDescription,
+              });
+              changed = true;
+            }
+            return changed ? next : prev;
+          });
+        })
+        .catch(err => {
+          if (String(err?.message || '').includes('401')) return;
+          console.warn('[chat] failed to poll session revisions', err);
+        })
+        .finally(() => {
+          revisionPollInFlightRef.current = false;
+        });
+    }, []);
+
+    useEffect(() => {
+      pollSessionRevisions();
+      const intervalId = window.setInterval(pollSessionRevisions, 7000);
+      const onFocus = () => pollSessionRevisions();
+      const onVisibility = () => {
+        if (document.visibilityState === 'visible') {
+          pollSessionRevisions();
+        }
+      };
+      window.addEventListener('focus', onFocus);
+      document.addEventListener('visibilitychange', onVisibility);
+      return () => {
+        window.clearInterval(intervalId);
+        window.removeEventListener('focus', onFocus);
+        document.removeEventListener('visibilitychange', onVisibility);
+      };
+    }, [pollSessionRevisions]);
 
     useEffect(() => {
       if (!activeKey) return;
