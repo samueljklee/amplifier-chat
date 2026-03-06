@@ -18,6 +18,16 @@ Schema (one dict per session in scan_sessions() output):
     revision: str               — mtime_ns:size signature for stale-change detection
     name: str|None              — session name from metadata.json
     description: str|None       — session description from metadata.json
+
+Performance notes:
+    H3: message_count is read from metadata.json ``turn_count`` when present
+        (O(1)), falling back to a full transcript scan only when absent.
+    H4: last_user_message uses a tail-seek of the last _TAIL_BYTES of the
+        transcript (O(1) w.r.t. file size) instead of a full forward read.
+    H5: Session directories that are symlinks escaping sessions_dir are
+        silently skipped (containment check).
+    H2: Per-session metadata reads in scan_sessions() run in a
+        ThreadPoolExecutor(max_workers=8) for parallelism on slow storage.
 """
 
 from __future__ import annotations
@@ -26,6 +36,7 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -37,6 +48,9 @@ METADATA_FILENAME = "metadata.json"
 SESSION_INFO_FILENAME = "session-info.json"
 
 _VALID_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+# H4: only read the last N bytes of a transcript when tail-seeking
+_TAIL_BYTES = 8192
 
 
 def _session_revision_signature(session_dir: Path) -> tuple[str, str]:
@@ -53,9 +67,54 @@ def _session_revision_signature(session_dir: Path) -> tuple[str, str]:
         return datetime.now(tz=UTC).isoformat(), "0:0"
 
 
+def _tail_seek_last_user_message(transcript_path: Path) -> str | None:
+    """H4: Seek to the last _TAIL_BYTES of a transcript to find the last user message.
+
+    Reads at most _TAIL_BYTES from the end of the file, so performance is
+    O(1) with respect to total file size regardless of how many turns exist.
+    Returns the last user-role message text truncated to 120 characters,
+    or None if no user message is found in the tail window.
+    """
+    last_user_message: str | None = None
+    try:
+        file_size = transcript_path.stat().st_size
+        with open(transcript_path, encoding="utf-8") as f:
+            if file_size > _TAIL_BYTES:
+                f.seek(file_size - _TAIL_BYTES)
+                f.readline()  # discard partial line that starts after the seek point
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict) or obj.get("role") != "user":
+                    continue
+                content = obj.get("content", "")
+                if isinstance(content, list):
+                    # content-block array format — join all text blocks
+                    text_parts = [
+                        b.get("text", "")
+                        for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ]
+                    last_user_message = " ".join(text_parts)[:120]
+                elif isinstance(content, str):
+                    last_user_message = content[:120]
+    except OSError:
+        pass
+    return last_user_message
+
+
 def _read_session_meta(session_dir: Path) -> dict[str, Any]:
-    """Extract lightweight metadata from a single session directory."""
-    # Try to read CWD from session-info.json
+    """Extract lightweight metadata from a single session directory.
+
+    Must be a module-level function (not a closure) so ThreadPoolExecutor
+    can call it safely from worker threads.
+    """
+    # --- session-info.json: working directory ---
     cwd: str | None = None
     info_path = session_dir / SESSION_INFO_FILENAME
     try:
@@ -68,17 +127,17 @@ def _read_session_meta(session_dir: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         pass
 
+    # --- metadata.json: parent, agent, name, description, cwd fallback, turn_count ---
     parent_session_id: str | None = None
     spawn_agent: str | None = None
     session_name: str | None = None
     session_description: str | None = None
+    turn_count: int | None = None  # H3: O(1) message_count when present
     metadata_path = session_dir / METADATA_FILENAME
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if isinstance(metadata, dict):
-            raw_parent = metadata.get("parent_id") or metadata.get(
-                "parent_session_id"
-            )
+            raw_parent = metadata.get("parent_id") or metadata.get("parent_session_id")
             if (
                 isinstance(raw_parent, str)
                 and raw_parent
@@ -101,6 +160,10 @@ def _read_session_meta(session_dir: Path) -> dict[str, Any]:
                     normalized = os.path.normpath(raw_cwd)
                     if os.path.isabs(normalized) and len(normalized) <= 4096:
                         cwd = normalized
+            # H3: use turn_count for O(1) message counting when available
+            raw_tc = metadata.get("turn_count")
+            if isinstance(raw_tc, int) and raw_tc >= 0:
+                turn_count = raw_tc
     except (OSError, json.JSONDecodeError):
         pass
 
@@ -110,39 +173,46 @@ def _read_session_meta(session_dir: Path) -> dict[str, Any]:
     last_updated, revision = _session_revision_signature(session_dir)
 
     if transcript_path.exists():
-        try:
-            with transcript_path.open(encoding="utf-8") as f:
-                for raw_line in f:
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(entry, dict) or not entry.get("role"):
-                        continue
-                    message_count += 1
-                    if entry["role"] == "user":
-                        content = entry.get("content", "")
-                        if isinstance(content, str):
-                            last_user_message = content[:120]
-                        elif isinstance(content, list):
-                            for block in content:
-                                if (
-                                    isinstance(block, dict)
-                                    and block.get("type") == "text"
-                                ):
-                                    last_user_message = (
-                                        block.get("text") or ""
-                                    )[:120]
-                                    break
-        except OSError:
-            logger.warning(
-                "Could not read transcript at %s",
-                transcript_path,
-                exc_info=True,
-            )
+        if turn_count is not None:
+            # H3: message_count from metadata — no transcript scan needed
+            message_count = turn_count
+            # H4: tail-seek for last_user_message — O(1) regardless of file size
+            last_user_message = _tail_seek_last_user_message(transcript_path)
+        else:
+            # Fallback: full forward scan for both message_count and last_user_message
+            try:
+                with transcript_path.open(encoding="utf-8") as f:
+                    for raw_line in f:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(entry, dict) or not entry.get("role"):
+                            continue
+                        message_count += 1
+                        if entry["role"] == "user":
+                            content = entry.get("content", "")
+                            if isinstance(content, str):
+                                last_user_message = content[:120]
+                            elif isinstance(content, list):
+                                for block in content:
+                                    if (
+                                        isinstance(block, dict)
+                                        and block.get("type") == "text"
+                                    ):
+                                        last_user_message = (
+                                            block.get("text") or ""
+                                        )[:120]
+                                        break
+            except OSError:
+                logger.warning(
+                    "Could not read transcript at %s",
+                    transcript_path,
+                    exc_info=True,
+                )
 
     return {
         "session_id": session_dir.name,
@@ -159,26 +229,39 @@ def _read_session_meta(session_dir: Path) -> dict[str, Any]:
 
 
 def _iter_session_dirs(sessions_dir: Path) -> list[Path]:
-    """Return validated session directories under sessions_dir."""
+    """Return validated session directories under sessions_dir.
+
+    H5: Symlinks whose resolved path escapes sessions_dir are silently skipped
+    to prevent directory-traversal via crafted symlinks.
+    """
     if not sessions_dir.exists():
         return []
 
     try:
         children = list(sessions_dir.iterdir())
     except OSError:
-        logger.warning(
-            "Could not list sessions at %s", sessions_dir, exc_info=True
-        )
+        logger.warning("Could not list sessions at %s", sessions_dir, exc_info=True)
         return []
+
+    # H5: resolve once so all children can be checked cheaply
+    resolved_sessions = sessions_dir.resolve()
 
     session_dirs: list[Path] = []
     for child in children:
         if not child.is_dir():
             continue
         if not _VALID_SESSION_ID_RE.fullmatch(child.name):
-            logger.debug(
-                "Skipping session dir with non-standard name: %r", child.name
-            )
+            logger.debug("Skipping session dir with non-standard name: %r", child.name)
+            continue
+        # H5: symlink containment — skip any entry whose real path escapes sessions_dir
+        try:
+            if not child.resolve().is_relative_to(resolved_sessions):
+                logger.warning(
+                    "Skipping session dir that escapes sessions_dir via symlink: %r",
+                    str(child),
+                )
+                continue
+        except (OSError, ValueError):
             continue
         session_dirs.append(child)
 
@@ -190,21 +273,29 @@ def scan_sessions(sessions_dir: Path | None) -> list[dict[str, Any]]:
 
     Returns a list sorted newest-first by last_updated.
     Never raises — malformed sessions are included with degraded metadata.
+
+    H2: Per-session reads run in a ThreadPoolExecutor(max_workers=8) so that
+    slow or cold-cache file I/O on many sessions overlaps in parallel.
     """
     if sessions_dir is None:
         return []
 
+    session_dirs = list(_iter_session_dirs(sessions_dir))
+
+    # H2: parallel I/O — _read_session_meta is a module-level function so it
+    # is safely callable from worker threads without pickling issues.
     results: list[dict[str, Any]] = []
-    for session_dir in _iter_session_dirs(sessions_dir):
-        try:
-            meta = _read_session_meta(session_dir)
-            results.append(meta)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Skipping session %s due to unexpected error",
-                session_dir,
-                exc_info=True,
-            )
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        future_to_dir = {pool.submit(_read_session_meta, d): d for d in session_dirs}
+        for future, session_dir in future_to_dir.items():
+            try:
+                results.append(future.result())
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Skipping session %s due to unexpected error",
+                    session_dir,
+                    exc_info=True,
+                )
 
     results.sort(key=lambda s: s["last_updated"], reverse=True)
     return results
