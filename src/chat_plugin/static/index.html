@@ -3197,6 +3197,32 @@
           break;
 
         case 'content_start': {
+          // Sub-session routing
+          {
+            const subKey = resolveSubSessionKey(msg);
+            if (subKey && (msg.nesting_depth ?? 0) > 0) {
+              if (msg.block_type === 'text') {
+                const itemId = makeId();
+                const subIdx = subNextIndexRef.current.get(subKey) ?? 0;
+                subNextIndexRef.current.set(subKey, subIdx + 1);
+                const blockMap = subBlockMapRef.current.get(subKey);
+                if (blockMap) blockMap.set('id-' + subIdx, itemId);
+                addSubSessionContent(subKey, {
+                  id: itemId, type: 'text', content: '', streaming: true, role: 'assistant',
+                });
+              } else if (msg.block_type === 'thinking') {
+                const itemId = makeId();
+                const subIdx = subNextIndexRef.current.get(subKey) ?? 0;
+                subNextIndexRef.current.set(subKey, subIdx + 1);
+                const blockMap = subBlockMapRef.current.get(subKey);
+                if (blockMap) blockMap.set('thinking-id-' + subIdx, itemId);
+                addSubSessionContent(subKey, {
+                  id: itemId, type: 'thinking', content: '', streaming: true,
+                });
+              }
+              break;
+            }
+          }
           // Remove client-side placeholder if present
           const placeholderId = placeholderIdRef.current;
           if (placeholderId) {
@@ -3225,6 +3251,29 @@
         }
 
         case 'content_delta': {
+          // Sub-session routing
+          {
+            const subKey = resolveSubSessionKey(msg);
+            if (subKey && (msg.nesting_depth ?? 0) > 0) {
+              const delta = typeof msg.delta === 'string' ? msg.delta : '';
+              if (!delta) break;
+              const blockMap = subBlockMapRef.current.get(subKey);
+              const subIdx = msg.index ?? 0;
+              const textItemId = blockMap ? blockMap.get('id-' + subIdx) : null;
+              if (textItemId) {
+                const el = document.getElementById(textItemId);
+                if (el) {
+                  el.textContent += delta;
+                } else {
+                  updateSubSessionContent(subKey, sub => {
+                    const item = sub.content.find(c => c.id === textItemId);
+                    if (item) item.content += delta;
+                  });
+                }
+              }
+              break;
+            }
+          }
           const delta = typeof msg.delta === 'string' ? msg.delta : '';
           if (!delta) break;
           const localIdx = getLocalIndex(msg.index);
@@ -3257,6 +3306,40 @@
         }
 
         case 'content_end': {
+          // Sub-session routing
+          {
+            const subKey = resolveSubSessionKey(msg);
+            if (subKey && (msg.nesting_depth ?? 0) > 0) {
+              const blockMap = subBlockMapRef.current.get(subKey);
+              const subIdx = msg.index ?? 0;
+              const textItemId = blockMap ? blockMap.get('id-' + subIdx) : null;
+              const thinkItemId = blockMap ? blockMap.get('thinking-id-' + subIdx) : null;
+              const payloadText = typeof msg.text === 'string' ? msg.text : '';
+              if (textItemId) {
+                const domEl = document.getElementById(textItemId);
+                const domText = domEl ? domEl.textContent : '';
+                const finalText = payloadText || domText;
+                const parsedHtml = sanitizeHtml(marked.parse(finalText));
+                updateSubSessionContent(subKey, sub => {
+                  const item = sub.content.find(c => c.id === textItemId);
+                  if (item) {
+                    item.streaming = false;
+                    item.content = finalText;
+                    item.htmlContent = parsedHtml;
+                  }
+                });
+              } else if (thinkItemId) {
+                updateSubSessionContent(subKey, sub => {
+                  const item = sub.content.find(c => c.id === thinkItemId);
+                  if (item) {
+                    item.streaming = false;
+                    item.content = payloadText || item.content || '';
+                  }
+                });
+              }
+              break;
+            }
+          }
           const localIdx = getLocalIndex(msg.index);
           const payloadText = typeof msg.text === 'string' ? msg.text : '';
           const textItemId = blockMapRef.current['id-' + localIdx];
