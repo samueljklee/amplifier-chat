@@ -4566,6 +4566,8 @@
 
     // —— Send ————————————————————————————————————————————————————————
     // — Sub-session navigation —
+    // Use a ref to access switchSession (defined later) without hook ordering issues
+    const switchSessionRef = useRef(null);
     const navigateToSession = useCallback((sessionId) => {
       if (!sessionId) return;
       for (const [key, session] of sessionsRef.current.entries()) {
@@ -4573,24 +4575,24 @@
           // Expand the parent session in the sidebar so the child is visible
           const parentId = session.parentSessionId;
           if (parentId) {
-            // Find the parent's key and ensure its tree node is expanded
             for (const [pKey, pSession] of sessionsRef.current.entries()) {
               if (pSession && pSession.sessionId === parentId) {
                 setCollapsedSpawnGroups(prev => {
                   const next = new Set(prev);
-                  next.delete(pKey); // uncollapse parent tree node
+                  next.delete(pKey);
                   return next;
                 });
                 break;
               }
             }
           }
-          // Use switchSession which handles transcript loading, SSE, state reset
-          switchSession(key);
+          if (switchSessionRef.current) {
+            switchSessionRef.current(key);
+          }
           return;
         }
       }
-    }, [switchSession]);
+    }, []);
 
     const sendMessage = useCallback(async (content, images) => {
       const key = activeKeyRef.current;
@@ -5120,6 +5122,7 @@
         }
       }
     }, [sessions, handleWsMessage, resumeHistorySession]);
+    switchSessionRef.current = switchSession;
 
     // NOTE: pollSessionRevisions removed — consolidated into the 10s
     // history re-poll (refreshHistory).  The history endpoint now returns
