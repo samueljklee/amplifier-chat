@@ -2059,10 +2059,13 @@
       try { parsed = JSON.parse(resultStr); } catch {}
       if (!parsed || typeof parsed !== 'object') continue;
 
-      const childSessionId = parsed.session_id || parsed.sessionId;
+      // session_id may be at top level or nested inside output
+      const out = parsed.output && typeof parsed.output === 'object' ? parsed.output : null;
+      const childSessionId = parsed.session_id || parsed.sessionId
+        || (out && (out.session_id || out.sessionId));
       if (!childSessionId || typeof childSessionId !== 'string') continue;
 
-      const agent = parsed.agent
+      const agent = parsed.agent || (out && out.agent)
         || item.subAgentName
         || (item.arguments && item.arguments.agent)
         || null;
