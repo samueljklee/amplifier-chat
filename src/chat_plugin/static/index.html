@@ -1463,6 +1463,10 @@
         if (p.id == null && p.request_id != null) p.id = p.request_id;
         break;
     }
+    // Preserve sub-session routing fields from kernel events
+    if (payload.child_session_id && !p.child_session_id) p.child_session_id = payload.child_session_id;
+    if (payload.parent_tool_call_id && !p.parent_tool_call_id) p.parent_tool_call_id = payload.parent_tool_call_id;
+    if (payload.nesting_depth != null && p.nesting_depth == null) p.nesting_depth = payload.nesting_depth;
     return p;
   }
 
@@ -3470,6 +3474,26 @@
         }
 
         case 'tool_call': {
+          // Sub-session routing
+          {
+            const subKey = resolveSubSessionKey(msg);
+            if (subKey && (msg.nesting_depth ?? 0) > 0) {
+              const itemId = makeId();
+              // Register in toolMapRef so deeper session_forks can resolve
+              toolMapRef.current[msg.tool_call_id] = itemId;
+              addSubSessionToolCall(subKey, {
+                id: itemId,
+                type: 'tool_call',
+                toolName: msg.tool_name,
+                toolCallId: msg.tool_call_id,
+                arguments: msg.arguments || {},
+                toolStatus: 'running',
+                origin: 'sub-agent',
+                subAgentName: null,
+              });
+              break;
+            }
+          }
           // Remove client-side placeholder if tool call comes before content
           const placeholderId = placeholderIdRef.current;
           if (placeholderId) {
@@ -3499,6 +3523,31 @@
         }
 
         case 'tool_result': {
+          // Check if this result completes a sub-session (parent delegate/task finishing)
+          if (subSessionsRef.current.has(msg.tool_call_id)) {
+            endSubSession(msg.tool_call_id, msg.success ? 'complete' : 'error');
+            // Still update the tool call item status in main chronoItems
+            const itemId = toolMapRef.current[msg.tool_call_id];
+            cycleRef.current++;
+            setChronoItems(prev => prev.map(item =>
+              item.id === itemId
+                ? { ...item, toolStatus: msg.success ? 'complete' : 'error', result: msg.output, resultError: msg.error }
+                : item
+            ));
+            break;
+          }
+          // Check if this is a tool result for a tool INSIDE a sub-session
+          {
+            const subKey = resolveSubSessionKey(msg);
+            if (subKey && (msg.nesting_depth ?? 0) > 0) {
+              updateSubSessionToolCall(subKey, msg.tool_call_id, tc => {
+                tc.toolStatus = msg.success ? 'complete' : 'error';
+                tc.result = msg.output;
+                tc.resultError = msg.error;
+              });
+              break;
+            }
+          }
           const itemId = toolMapRef.current[msg.tool_call_id];
           cycleRef.current++;
           setChronoItems(prev => prev.map(item =>
