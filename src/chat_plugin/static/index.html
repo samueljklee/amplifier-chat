@@ -2012,69 +2012,134 @@
    * and content items belonging to child sessions are moved into SubSession entries
    * in the provided subSessionsRef map.
    */
-  function reconstructSubSessionsFromTranscript(items, subSessionsRef) {
-    // Identify delegation tool calls that spawned child sessions
-    const delegateTools = [];
-    const childSessionIds = new Set();
+  /**
+   * Scan chrono items for delegate/task tool calls, extract child session IDs
+   * from their tool results, and return a list of {parentToolCallId, childSessionId, agent}
+   * entries that need child transcript fetching.
+   *
+   * The child session_id is embedded in the tool result's JSON-encoded content string:
+   *   {"response": "...", "session_id": "child-xxx", "agent": "foundation:explorer", ...}
+   */
+  function findDelegationChildSessions(items) {
+    const results = [];
+    // Build a map of toolCallId -> tool result item for quick lookup
+    const resultByToolCallId = {};
     for (const item of items) {
-      if (item.type === 'tool_call'
-          && (item.toolName === 'delegate' || item.toolName === 'task')
-          && item.originSessionId) {
-        // This is a tool call that was executed IN a child session — it's a sub-agent's tool.
-        // We want the PARENT delegate/task tool call, which has origin === 'main'.
-        continue;
-      }
-      if (item.type === 'tool_call'
-          && (item.toolName === 'delegate' || item.toolName === 'task')
-          && item.origin === 'main') {
-        delegateTools.push(item);
+      if (item.type === 'tool_call' && item.result && typeof item.result === 'string') {
+        resultByToolCallId[item.toolCallId] = item;
       }
     }
 
-    if (delegateTools.length === 0) return items;
+    for (const item of items) {
+      if (item.type !== 'tool_call') continue;
+      if (item.toolName !== 'delegate' && item.toolName !== 'task') continue;
 
-    // For each delegate tool, find child items that belong to its spawned session.
-    // Child items have originSessionId or originParentId set.
-    // The matching heuristic: items with origin === 'sub-agent' that appear
-    // between this delegate tool_call and the next main-session item.
-    const childItemIds = new Set();
-    for (const dt of delegateTools) {
-      const dtOrder = dt.order;
-      const childItems = [];
-      let childOrder = 0;
+      // Try to extract child session_id from the result JSON
+      const resultStr = item.result;
+      if (!resultStr || typeof resultStr !== 'string') continue;
 
-      for (const item of items) {
-        if (item === dt) continue;
-        if (item.origin === 'sub-agent' && item.order > dtOrder) {
-          // Check if this belongs to a LATER delegate (stop if we hit one)
-          const laterDelegate = delegateTools.find(d => d !== dt && d.order > dtOrder && d.order < item.order);
-          if (laterDelegate) continue;
+      let parsed = null;
+      try { parsed = JSON.parse(resultStr); } catch {}
+      if (!parsed || typeof parsed !== 'object') continue;
 
-          childItems.push({ ...item, order: childOrder++ });
-          childItemIds.add(item.id);
+      const childSessionId = parsed.session_id || parsed.sessionId;
+      if (!childSessionId || typeof childSessionId !== 'string') continue;
+
+      const agent = parsed.agent
+        || item.subAgentName
+        || (item.arguments && item.arguments.agent)
+        || null;
+
+      results.push({
+        parentToolCallId: item.toolCallId,
+        parentItemId: item.id,
+        childSessionId,
+        agent,
+        toolStatus: item.toolStatus,
+      });
+    }
+    return results;
+  }
+
+  /**
+   * Async: fetch child transcripts for delegate/task tool calls and populate
+   * subSessionsRef with the child's content. Mutates items in place (sets subSessionId).
+   * Returns a promise that resolves when all child transcripts are loaded.
+   */
+  async function reconstructSubSessionsFromTranscript(items, subSessionsRef) {
+    const delegations = findDelegationChildSessions(items);
+    if (delegations.length === 0) return items;
+
+    // Fetch all child transcripts in parallel
+    const fetches = delegations.map(async (del) => {
+      try {
+        const data = await api.getTranscript(del.childSessionId);
+        const transcript = Array.isArray(data?.transcript) ? data.transcript : [];
+        if (transcript.length === 0) return null;
+
+        const childItems = transcriptToChronoItems(transcript);
+        return { del, childItems };
+      } catch {
+        // Child transcript unavailable (deleted, different project, etc.) — skip silently
+        return null;
+      }
+    });
+
+    const results = await Promise.all(fetches);
+
+    for (const result of results) {
+      if (!result) continue;
+      const { del, childItems } = result;
+
+      // Build SubSession from child's chrono items
+      let orderCounter = 0;
+      const content = [];
+      const toolCalls = [];
+      for (const ci of childItems) {
+        ci.order = orderCounter++;
+        if (ci.type === 'tool_call') {
+          toolCalls.push(ci);
+        } else {
+          content.push(ci);
         }
       }
 
-      if (childItems.length === 0) continue;
-
-      const parentToolCallId = dt.toolCallId;
-      subSessionsRef.current.set(parentToolCallId, {
-        sessionId: null, // not available from transcript
-        parentToolCallId,
-        agent: dt.subAgentName || (dt.arguments && dt.arguments.agent) || null,
-        status: dt.toolStatus === 'error' ? 'error' : 'complete',
-        content: childItems.filter(i => i.type !== 'tool_call'),
-        toolCalls: childItems.filter(i => i.type === 'tool_call'),
-        orderCounter: childItems.length,
+      subSessionsRef.current.set(del.parentToolCallId, {
+        sessionId: del.childSessionId,
+        parentToolCallId: del.parentToolCallId,
+        agent: del.agent,
+        status: del.toolStatus === 'error' ? 'error' : 'complete',
+        content,
+        toolCalls,
+        orderCounter,
       });
 
-      dt.subSessionId = parentToolCallId; // flag for rendering
+      // Set flag on parent item for rendering
+      const parentItem = items.find(i => i.id === del.parentItemId);
+      if (parentItem) parentItem.subSessionId = del.childSessionId;
+
+      // Register tool calls from child in toolMapRef so nested sub-sessions can resolve
+      for (const tc of toolCalls) {
+        if (tc.toolCallId) {
+          // Check if this child tool call is itself a delegation with a child transcript
+          // (recursive nesting from saved sessions)
+          // For now, register the toolCallId for potential deeper reconstruction
+        }
+      }
     }
 
-    // Remove child items from main timeline
-    if (childItemIds.size > 0) {
-      return items.filter(item => !childItemIds.has(item.id));
+    // Recurse: check if any child sub-sessions themselves contain delegations
+    // by scanning the newly added toolCalls for delegate/task results
+    for (const result of results) {
+      if (!result) continue;
+      const { del, childItems } = result;
+      const nestedDelegations = findDelegationChildSessions(childItems);
+      if (nestedDelegations.length > 0) {
+        // Fetch grandchild transcripts
+        await reconstructSubSessionsFromTranscript(childItems, subSessionsRef);
+      }
     }
+
     return items;
   }
 
@@ -4763,11 +4828,12 @@
 
       // Fetch transcript via amplifierd REST API
       api.getTranscript(target.sessionId)
-        .then(data => {
+        .then(async (data) => {
           if (transcriptAbort.signal.aborted) return;
           const transcript = Array.isArray(data?.transcript) ? data.transcript : [];
           let items = transcriptToChronoItems(transcript);
-          items = reconstructSubSessionsFromTranscript(items, subSessionsRef);
+          await reconstructSubSessionsFromTranscript(items, subSessionsRef);
+          setSubSessionRevision(r => r + 1);
           const messageCount = countTranscriptMessages(transcript);
           const restoredTurns = messageCount || target.savedTurnCount || target.turnCount || 0;
           const revision = typeof data?.revision === 'string'
@@ -4886,10 +4952,11 @@
       );
 
       api.getTranscript(target.sessionId)
-        .then(data => {
+        .then(async (data) => {
           const transcript = Array.isArray(data?.transcript) ? data.transcript : [];
           let items = transcriptToChronoItems(transcript);
-          items = reconstructSubSessionsFromTranscript(items, subSessionsRef);
+          await reconstructSubSessionsFromTranscript(items, subSessionsRef);
+          setSubSessionRevision(r => r + 1);
           const messageCount = countTranscriptMessages(transcript);
           const nextTurns = messageCount || target.savedTurnCount || target.turnCount || 0;
           const nextCount = Number(messageCount || nextTurns || 0);
