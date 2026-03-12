@@ -138,7 +138,7 @@ class TestExtractFindings:
         # extractFindings should use JSON.parse on some substring
         fn_start = src.find("function extractFindings")
         assert fn_start != -1
-        fn_region = src[fn_start : fn_start + 600]
+        fn_region = src[fn_start : fn_start + 1200]
         assert "JSON.parse" in fn_region
 
     def test_returns_empty_on_failure(self):

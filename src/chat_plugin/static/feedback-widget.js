@@ -375,6 +375,10 @@
     '  color: var(--ink-fog, var(--text-muted, #555));',
     '}',
     '.amp-fb-spinner-sm { width: 14px; height: 14px; flex-shrink: 0; }',
+    '.amp-fb-analysis-summary {',
+    '  padding: 8px 12px; font-size: 12px;',
+    '  color: var(--ink-slate, var(--text-secondary, #999));',
+    '}',
     '.amp-fb-analysis-empty {',
     '  display: flex; align-items: center; gap: 8px;',
     '  padding: 8px 12px; font-size: 13px;',
@@ -519,6 +523,8 @@
   function extractFindings(text) {
     // Strip markdown code fences
     var stripped = text.replace(/```[\w]*\n?/g, '').replace(/```/g, '').trim();
+    console.log('[feedback-analysis] extractFindings input length:', text.length,
+      'stripped length:', stripped.length);
 
     // Try parsing the outermost JSON structure
     var objStart = stripped.indexOf('{');
@@ -526,10 +532,14 @@
     var arrStart = stripped.indexOf('[');
     var arrEnd = stripped.lastIndexOf(']');
 
+    console.log('[feedback-analysis] JSON markers: obj={' + objStart + ',' + objEnd +
+      '} arr=[' + arrStart + ',' + arrEnd + ']');
+
     // Try object first if it appears before array (LLM sometimes returns nested format)
     if (objStart !== -1 && objEnd > objStart && (arrStart === -1 || objStart < arrStart)) {
       try {
         var obj = JSON.parse(stripped.substring(objStart, objEnd + 1));
+        console.log('[feedback-analysis] Parsed as object. Keys:', Object.keys(obj).join(', '));
         // Handle nested {source: {github: {issues: [...]}, session: {...}, server_log: {errors: [...]}}}
         if (obj.source && typeof obj.source === 'object') {
           var flat = [];
@@ -551,21 +561,35 @@
           if (slog && slog.errors && Array.isArray(slog.errors)) {
             slog.errors.forEach(function (f) { flat.push(Object.assign({ source: 'server_log' }, f)); });
           }
+          console.log('[feedback-analysis] Flattened nested object:', flat.length, 'findings');
           if (flat.length > 0) return flat;
         }
         // Handle flat array wrapped in object: {findings: [...]}
-        if (obj.findings && Array.isArray(obj.findings)) return obj.findings;
+        if (obj.findings && Array.isArray(obj.findings)) {
+          console.log('[feedback-analysis] Found {findings: [...]}: ', obj.findings.length);
+          return obj.findings;
+        }
         // Handle if it's actually an array-like object
         if (Array.isArray(obj)) return obj;
-      } catch (e) { /* fall through to array parsing */ }
+        console.log('[feedback-analysis] Object parsed but no recognized structure');
+      } catch (e) {
+        console.warn('[feedback-analysis] Object parse failed:', e.message);
+        // fall through to array parsing
+      }
     }
 
     // Try flat array extraction
     if (arrStart !== -1 && arrEnd > arrStart) {
       try {
-        return JSON.parse(stripped.substring(arrStart, arrEnd + 1));
-      } catch (e) { /* fall through */ }
+        var arr = JSON.parse(stripped.substring(arrStart, arrEnd + 1));
+        console.log('[feedback-analysis] Parsed as flat array:', arr.length, 'items');
+        return arr;
+      } catch (e) {
+        console.warn('[feedback-analysis] Array parse failed:', e.message);
+      }
     }
+
+    console.log('[feedback-analysis] No parseable JSON found. First 500 chars:', stripped.substring(0, 500));
 
     return [];
   }
@@ -650,18 +674,12 @@
           onClick: function () { cancelAnalysis(); updateAnalysisUI('idle'); },
         }, ['Cancel']);
         var headerRow = el('div', { className: 'amp-fb-analysis-header' }, [
-          el('span', null, ['Analysis']),
           cancelBtn,
         ]);
         analysisSection.appendChild(headerRow);
         analysisSection.appendChild(logContainer);
         addLogEntry('Starting analysis\u2026');
       } else if (state === 'error') {
-        analysisSection.appendChild(
-          el('div', { className: 'amp-fb-analysis-header' }, [
-            el('span', null, ['Analysis']),
-          ])
-        );
         var errorRow = el('div', { className: 'amp-fb-analysis-error' }, [
           errorMsg || 'Analysis failed.',
           el('button', {
@@ -680,11 +698,6 @@
       } else if (state === 'complete') {
         transitionToFindings();
       } else if (state === 'empty') {
-        analysisSection.appendChild(
-          el('div', { className: 'amp-fb-analysis-header' }, [
-            el('span', null, ['Analysis']),
-          ])
-        );
         analysisSection.appendChild(
           el('div', { className: 'amp-fb-analysis-empty' }, [
             '\u2713 No issues found in this session',
@@ -732,8 +745,8 @@
       setTimeout(function () {
         analysisSection.innerHTML = '';
         analysisSection.appendChild(
-          el('div', { className: 'amp-fb-analysis-header' }, [
-            el('span', null, [findings.length + ' finding' + (findings.length !== 1 ? 's' : '') + ' \u2014 uncheck to exclude']),
+          el('div', { className: 'amp-fb-analysis-summary' }, [
+            findings.length + ' finding' + (findings.length !== 1 ? 's' : '') + ' \u2014 uncheck to exclude',
           ])
         );
         renderFindingsInto(analysisSection);
@@ -1059,6 +1072,7 @@
       ]),
       // Analysis findings
       el('div', { className: 'amp-fb-field amp-fb-field-analysis' }, [
+        el('label', { className: 'amp-fb-label' }, ['Analysis']),
         analysisSection,
       ]),
       // Actions
@@ -1082,6 +1096,16 @@
 
     // Kick off analysis
     startAnalysis();
+
+    // Debug: listen for simulated findings (from AmplifierFeedback.simulateFindings())
+    function onSimulate(e) {
+      findings = e.detail || [];
+      for (var i = 0; i < findings.length; i++) { findingChecked[i] = true; }
+      analysisComplete = true;
+      closeSSE();
+      updateAnalysisUI('complete');
+    }
+    window.addEventListener('amp-fb-simulate', onSimulate);
 
     // Keyboard handling
     function onKey(e) {
@@ -1110,6 +1134,7 @@
     function closeModal() {
       cancelAnalysis();
       document.removeEventListener('keydown', onKey);
+      window.removeEventListener('amp-fb-simulate', onSimulate);
       if (backdrop.parentNode) { backdrop.parentNode.removeChild(backdrop); }
       if (triggerEl) { try { triggerEl.focus(); } catch (e) { /* noop */ } }
     }
@@ -1225,5 +1250,20 @@
   /*  Export                                                              */
   /* ------------------------------------------------------------------ */
 
-  window.AmplifierFeedback = { init: init };
+  window.AmplifierFeedback = {
+    init: init,
+    // Debug: simulate findings in an open modal. Run from browser console:
+    //   AmplifierFeedback.simulateFindings()
+    simulateFindings: function () {
+      var fake = [
+        { source: 'github', number: 42, title: 'Session crashes when delegate tool times out', url: 'https://github.com/microsoft/amplifier-distro/issues/42', state: 'open', relevance: 'Same tool:error timeout pattern on foundation:explorer' },
+        { source: 'session', summary: 'tool:error - delegate to foundation:explorer timed out (turn 7)', timestamp: '2026-03-11T15:23:41Z', turn: 7, event_type: 'tool:error', error: { type: 'asyncio.TimeoutError', message: 'Task timed out after 300.0 seconds', traceback: ['coordinator.py:287 in _execute_tool', 'tasks.py:512 in wait_for -> raise TimeoutError()'] } },
+        { source: 'session', summary: 'Provider returned 529 overloaded (turn 4)', timestamp: '2026-03-11T15:21:12Z', turn: 4, event_type: 'provider:error', error: { type: 'anthropic.OverloadedError', message: 'Overloaded: Too many requests', traceback: ['provider.py:142 in complete', '_base_client.py:1468 in _request'] } },
+        { source: 'server_log', summary: 'ConnectionResetError on SSE stream', timestamp: '2026-03-11T15:23:42Z', log_level: 'ERROR', log_line: 'ERROR 2026-03-11 15:23:42 uvicorn.error - ConnectionResetError: [Errno 54]', context_lines: ['INFO 15:23:41 POST /sessions/abc123/execute/stream 200', 'ERROR 15:23:42 ConnectionResetError: [Errno 54] Connection reset by peer', 'INFO 15:23:42 SSE subscriber removed for session abc123'] },
+      ];
+      // Dispatch a custom event that the open modal can pick up
+      window.dispatchEvent(new CustomEvent('amp-fb-simulate', { detail: fake }));
+      console.log('[feedback-analysis] Simulated', fake.length, 'findings. Open the feedback modal first.');
+    },
+  };
 })();
