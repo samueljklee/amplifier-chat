@@ -3817,6 +3817,15 @@
       });
     }
 
+    function resumeQueue() {
+      const key = activeKeyRef.current;
+      if (!key) return;
+      const drainState = getQueueDrainState(key);
+      if (drainState !== 'paused') return;
+      setQueueDrainStateFn('idle', key);
+      tryDrainQueue();
+    }
+
     useEffect(() => {
       activeKeyRef.current = activeKey;
     }, [activeKey]);
@@ -5458,6 +5467,11 @@
           console.error('[chat] cancelExecution failed', err);
         });
       }
+      // Pause queue drain — items remain visible, user must Resume
+      cancelCountdown();
+      if (getQueue(key).length > 0) {
+        setQueueDrainStateFn('paused', key);
+      }
     }, []);
 
     const respondToApproval = useCallback((choice) => {
@@ -6393,10 +6407,7 @@
                   removeFromQueue(msgId);
                 }
               }}
-              onResume=${() => {
-                // resumeQueue will be wired in a later task — for now just set drain state
-                setQueueDrainStateFn('idle');
-              }}
+              onResume=${resumeQueue}
             />
             <${InputArea}
               onSend=${sendMessage}
