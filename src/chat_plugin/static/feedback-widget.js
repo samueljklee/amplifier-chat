@@ -432,8 +432,12 @@
     var analysisComplete = false;
     var responseText = '';
     var findings = [];
-    var findingChecked = {};
+    var findingChecked = {}; // Used by renderFindings (next task)
     var analysisSection = el('div', { className: 'amp-fb-analysis' });
+
+    function closeSSE() {
+      if (analysisSSE) { analysisSSE.close(); analysisSSE = null; }
+    }
 
     function updateAnalysisUI(state, errorMsg) {
       analysisSection.innerHTML = '';
@@ -497,12 +501,12 @@
           var payload = JSON.parse(e.data);
           var delta = payload.delta || payload;
           responseText += (delta.text || delta.thinking || '');
-        } catch (ex) { /* ignore parse errors */ }
+        } catch (ex) { console.warn('SSE delta parse error:', ex); }
       });
 
       function onComplete() {
         analysisComplete = true;
-        if (analysisSSE) { analysisSSE.close(); analysisSSE = null; }
+        closeSSE();
         findings = extractFindings(responseText);
         renderFindings();
       }
@@ -517,18 +521,18 @@
           findings = extractFindings(responseText);
           if (findings.length > 0) {
             analysisComplete = true;
-            if (analysisSSE) { analysisSSE.close(); analysisSSE = null; }
+            closeSSE();
             renderFindings();
             return;
           }
         }
         updateAnalysisUI('error', 'Connection to analysis stream lost.');
-        if (analysisSSE) { analysisSSE.close(); analysisSSE = null; }
+        closeSSE();
       };
     }
 
     function cancelAnalysis() {
-      if (analysisSSE) { analysisSSE.close(); analysisSSE = null; }
+      closeSSE();
       if (analysisSessionId && !analysisComplete) {
         fetch('/sessions/' + encodeURIComponent(analysisSessionId) + '/cancel', {
           method: 'POST',
