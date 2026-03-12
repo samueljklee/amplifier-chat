@@ -505,6 +505,7 @@
       });
 
       function onComplete() {
+        if (analysisComplete) return;
         analysisComplete = true;
         closeSSE();
         findings = extractFindings(responseText);

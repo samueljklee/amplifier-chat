@@ -231,3 +231,15 @@ class TestAnalysisLifecycle:
         """Placeholder renderFindings shows count."""
         src = _read(WIDGET_JS)
         assert "finding(s) ready" in src
+
+    def test_onComplete_guards_against_double_fire(self):
+        """onComplete must early-return if already complete to prevent double processing."""
+        src = _read(WIDGET_JS)
+        # Find the onComplete function body
+        fn_start = src.find("function onComplete()")
+        assert fn_start != -1, "onComplete function must exist"
+        fn_region = src[fn_start : fn_start + 300]
+        # Must contain an early-return guard checking analysisComplete
+        assert re.search(r"if\s*\(\s*analysisComplete\s*\)\s*return;", fn_region), (
+            "onComplete must guard against double-fire with 'if (analysisComplete) return;'"
+        )
