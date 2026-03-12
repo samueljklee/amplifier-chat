@@ -3767,6 +3767,56 @@
       setQueueVersion(v => v + 1);
     }
 
+    function cancelCountdown() {
+      if (countdownTimerRef.current) {
+        clearTimeout(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+      setCountdownRemaining(null);
+    }
+
+    function startCountdown(callback) {
+      cancelCountdown(); // clear any existing countdown
+      let remaining = 3;
+      setCountdownRemaining(remaining);
+      const tick = () => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          countdownTimerRef.current = null;
+          setCountdownRemaining(null);
+          callback();
+        } else {
+          setCountdownRemaining(remaining);
+          countdownTimerRef.current = setTimeout(tick, 1000);
+        }
+      };
+      countdownTimerRef.current = setTimeout(tick, 1000);
+    }
+
+    function tryDrainQueue() {
+      const key = activeKeyRef.current;
+      if (!key) return;
+      const queue = getQueue(key);
+      const drainState = getQueueDrainState(key);
+      if (queue.length === 0 || drainState === 'paused') {
+        if (drainState !== 'paused') setQueueDrainStateFn('idle', key);
+        return;
+      }
+      setQueueDrainStateFn('countdown', key);
+      startCountdown(() => {
+        // Pop the first item and send it
+        const q = getQueue(key);
+        if (q.length === 0) {
+          setQueueDrainStateFn('idle', key);
+          return;
+        }
+        const nextMsg = q[0];
+        removeFromQueue(nextMsg.id);
+        setQueueDrainStateFn('idle', key);
+        sendMessage(nextMsg.content, nextMsg.images || []);
+      });
+    }
+
     useEffect(() => {
       activeKeyRef.current = activeKey;
     }, [activeKey]);
@@ -4676,6 +4726,7 @@
               return next;
             });
             setExecuting(false);
+            tryDrainQueue();
             setTurnCount(nextTurn ?? (turnCountRef.current + 1));
           }
           // Flush accumulated token usage as a chrono item
@@ -4706,6 +4757,7 @@
             return next;
           });
           setExecuting(false);
+          tryDrainQueue();
           break;
 
         case 'execution_error': {
@@ -4726,6 +4778,7 @@
             return next;
           });
           setExecuting(false);
+          tryDrainQueue();
           setChronoItems(prev => [...prev, {
             id: makeId(), type: 'text', role: 'system',
             content: 'Warning: ' + (msg.error || 'Unknown error'),
@@ -5392,6 +5445,7 @@
           streaming: false, order: orderCounterRef.current++,
         }]);
         setExecuting(false);
+        tryDrainQueue();
       });
     }, [connect]);
 
@@ -6334,8 +6388,7 @@
                   if (countdownTimerRef.current) { clearTimeout(countdownTimerRef.current); countdownTimerRef.current = null; }
                   setCountdownRemaining(null);
                   removeFromQueue(msgId);
-                  // tryDrainQueue will be wired in a later task — for now just go idle
-                  setQueueDrainStateFn('idle');
+                  tryDrainQueue();
                 } else {
                   removeFromQueue(msgId);
                 }
