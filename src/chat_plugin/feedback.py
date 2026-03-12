@@ -100,25 +100,35 @@ _BASE_URL_DEFAULT = "http://127.0.0.1:8080"
 
 async def _create_analysis_session(base_url: str = _BASE_URL_DEFAULT) -> str:
     """Create a new session via POST /sessions and return its ID."""
+    logger.info("[feedback-analysis] Creating analysis session via %s", base_url)
     async with httpx.AsyncClient(base_url=base_url, timeout=30) as client:
         resp = await client.post("/sessions")
         resp.raise_for_status()
         data: dict[str, Any] = resp.json()
-        return data["session_id"]
+        sid = data["session_id"]
+        logger.info("[feedback-analysis] Analysis session created: %s", sid)
+        return sid
 
 
 async def _mark_session_hidden(base_url: str, session_id: str) -> None:
     """Mark a session as hidden via PATCH /sessions/{id}/metadata."""
+    logger.info("[feedback-analysis] Marking session %s as hidden", session_id)
     async with httpx.AsyncClient(base_url=base_url, timeout=30) as client:
         resp = await client.patch(
             f"/sessions/{session_id}/metadata",
             json={"hidden": True},
         )
         resp.raise_for_status()
+        logger.info("[feedback-analysis] Session %s marked hidden", session_id)
 
 
 async def _kick_off_execution(base_url: str, session_id: str, prompt: str) -> None:
     """Fire-and-forget: consume the SSE stream so the analysis runs."""
+    logger.info(
+        "[feedback-analysis] Starting execution for session %s (prompt length: %d)",
+        session_id,
+        len(prompt),
+    )
     async with httpx.AsyncClient(base_url=base_url, timeout=600) as client:
         async with client.stream(
             "POST",
@@ -126,8 +136,18 @@ async def _kick_off_execution(base_url: str, session_id: str, prompt: str) -> No
             json={"prompt": prompt},
         ) as resp:
             resp.raise_for_status()
+            logger.info(
+                "[feedback-analysis] SSE stream connected for session %s, consuming...",
+                session_id,
+            )
+            chunk_count = 0
             async for _chunk in resp.aiter_bytes():
-                pass  # consume stream to completion
+                chunk_count += 1
+            logger.info(
+                "[feedback-analysis] Execution complete for session %s (%d chunks received)",
+                session_id,
+                chunk_count,
+            )
 
 
 async def _safe_kick_off(base_url: str, session_id: str, prompt: str) -> None:
@@ -135,7 +155,10 @@ async def _safe_kick_off(base_url: str, session_id: str, prompt: str) -> None:
     try:
         await _kick_off_execution(base_url, session_id, prompt)
     except Exception:
-        logger.exception("Background analysis failed for session %s", session_id)
+        logger.exception(
+            "[feedback-analysis] Background analysis FAILED for session %s",
+            session_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -168,12 +191,25 @@ def create_feedback_routes(
                 detail="Session storage not configured",
             )
 
+        logger.info(
+            "[feedback-analysis] Analyze request for session %s",
+            body.session_id,
+        )
+
         transcript_path = _find_transcript_path(projects_dir, body.session_id)
         if transcript_path is None:
+            logger.warning(
+                "[feedback-analysis] Transcript not found for session %s "
+                "(projects_dir=%s)",
+                body.session_id,
+                projects_dir,
+            )
             raise HTTPException(
                 status_code=404,
                 detail=f"Transcript not found for session {body.session_id}",
             )
+
+        logger.info("[feedback-analysis] Found transcript at %s", transcript_path)
 
         base_url = str(request.base_url).rstrip("/")
 
@@ -184,6 +220,13 @@ def create_feedback_routes(
         # Build the prompt and kick off execution in the background
         prompt = _build_analysis_prompt(
             body.session_id, transcript_path, daemon_session_path
+        )
+        logger.info(
+            "[feedback-analysis] Kicking off background execution "
+            "(analysis_session=%s, target_session=%s, daemon_path=%s)",
+            analysis_session_id,
+            body.session_id,
+            daemon_session_path,
         )
         asyncio.create_task(
             _safe_kick_off(base_url, analysis_session_id, prompt),

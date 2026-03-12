@@ -153,5 +153,5 @@ async def test_safe_kick_off_logs_on_failure(caplog):
             await _safe_kick_off("http://localhost:8080", "sess-fail", "prompt")
 
     assert len(caplog.records) == 1
-    assert "Background analysis failed" in caplog.records[0].message
+    assert "Background analysis FAILED" in caplog.records[0].message
     assert "sess-fail" in caplog.records[0].message
