@@ -8,6 +8,7 @@ immediately so the UI can poll for results.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -61,12 +62,19 @@ def _build_analysis_prompt(
     TASK 1: search GitHub for related issues using ``gh issue list``.
     TASK 2: analyse the session transcript and server logs.
     """
-    output_schema = (
-        '{"source": {'
-        '"github": {"issues": [{"number": int, "title": str, "url": str}]}, '
-        '"session": {"session_id": str, "summary": str, "key_errors": [str]}, '
-        '"server_log": {"errors": [{"timestamp": str, "message": str}]}'
-        "}}"
+    output_schema = json.dumps(
+        {
+            "source": {
+                "github": {"issues": [{"number": "int", "title": "str", "url": "str"}]},
+                "session": {
+                    "session_id": "str",
+                    "summary": "str",
+                    "key_errors": ["str"],
+                },
+                "server_log": {"errors": [{"timestamp": "str", "message": "str"}]},
+            }
+        },
+        indent=2,
     )
 
     parts: list[str] = [

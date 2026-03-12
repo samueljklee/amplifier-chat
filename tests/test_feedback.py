@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -132,3 +134,24 @@ def test_analyze_rejects_invalid_body():
         json={},
     )
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for _safe_kick_off
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_safe_kick_off_logs_on_failure(caplog):
+    """_safe_kick_off logs via logger.exception when _kick_off_execution raises."""
+    from chat_plugin.feedback import _safe_kick_off
+
+    mock_kick = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+    with patch("chat_plugin.feedback._kick_off_execution", mock_kick):
+        with caplog.at_level("ERROR", logger="chat_plugin.feedback"):
+            await _safe_kick_off("http://localhost:8080", "sess-fail", "prompt")
+
+    assert len(caplog.records) == 1
+    assert "Background analysis failed" in caplog.records[0].message
+    assert "sess-fail" in caplog.records[0].message
