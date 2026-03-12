@@ -227,10 +227,10 @@ class TestAnalysisLifecycle:
         src = _read(WIDGET_JS)
         assert "analysisSection" in src
 
-    def test_placeholder_renderFindings(self):
-        """Placeholder renderFindings shows count."""
+    def test_renderFindings_exists(self):
+        """renderFindings function must exist in the modal scope."""
         src = _read(WIDGET_JS)
-        assert "finding(s) ready" in src
+        assert "function renderFindings" in src
 
     def test_onComplete_guards_against_double_fire(self):
         """onComplete must early-return if already complete to prevent double processing."""

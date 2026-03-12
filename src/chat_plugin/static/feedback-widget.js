@@ -418,6 +418,52 @@
     }
   }
 
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function buildFindingDetail(f, source) {
+    var parts = [];
+    if (source === 'github') {
+      if (f.relevance) {
+        parts.push('<p>' + escapeHtml(f.relevance) + '</p>');
+      }
+    } else if (source === 'session') {
+      if (f.event_type) {
+        parts.push('<div><strong>Event:</strong> ' + escapeHtml(f.event_type) + '</div>');
+      }
+      if (f.turn != null) {
+        parts.push('<div><strong>Turn:</strong> ' + escapeHtml(String(f.turn)) + '</div>');
+      }
+      if (f.error) {
+        if (f.error.type) {
+          parts.push('<div><strong>Type:</strong> ' + escapeHtml(f.error.type) + '</div>');
+        }
+        if (f.error.message) {
+          parts.push('<div>' + escapeHtml(f.error.message) + '</div>');
+        }
+        if (f.error.traceback && f.error.traceback.length) {
+          var frames = f.error.traceback.map(function (frame) { return escapeHtml(frame); });
+          parts.push('<pre>' + frames.join('\n') + '</pre>');
+        }
+      }
+    } else if (source === 'server_log') {
+      if (f.log_level) {
+        parts.push('<div><strong>Level:</strong> ' + escapeHtml(f.log_level) + '</div>');
+      }
+      if (f.context_lines && f.context_lines.length) {
+        var lines = f.context_lines.map(function (line) { return escapeHtml(line); });
+        parts.push('<pre>' + lines.join('\n') + '</pre>');
+      } else if (f.log_line) {
+        parts.push('<pre>' + escapeHtml(f.log_line) + '</pre>');
+      }
+    }
+    return parts.length ? parts.join('') : null;
+  }
+
   /* ------------------------------------------------------------------ */
   /*  Modal                                                              */
   /* ------------------------------------------------------------------ */
@@ -545,7 +591,73 @@
     }
 
     function renderFindings() {
-      analysisSection.textContent = findings.length + ' finding(s) ready.';
+      analysisSection.innerHTML = '';
+      var groups = [
+        { source: 'github',     label: 'Related Issues' },
+        { source: 'session',    label: 'Session Errors' },
+        { source: 'server_log', label: 'Server Logs' },
+      ];
+
+      groups.forEach(function (group) {
+        var groupFindings = findings.filter(function (f) {
+          return f.source === group.source;
+        });
+        if (!groupFindings.length) return;
+
+        var groupEl = el('div', { className: 'amp-fb-findings-group' });
+        groupEl.appendChild(
+          el('div', { className: 'amp-fb-findings-group-header' }, [group.label])
+        );
+
+        groupFindings.forEach(function (f) {
+          var idx = findings.indexOf(f);
+
+          var cb = el('input', { type: 'checkbox' });
+          cb.checked = findingChecked[idx] !== false;
+          cb.addEventListener('change', function () {
+            findingChecked[idx] = cb.checked;
+          });
+
+          var summaryEl;
+          if (group.source === 'github') {
+            var link = el('a', {
+              className: 'amp-fb-finding-link',
+              href: f.url || '#',
+              target: '_blank',
+              rel: 'noopener',
+            }, [f.title || f.url || '']);
+            var statusClass = 'amp-fb-finding-status ' + (f.state === 'closed' ? 'closed' : 'open');
+            var badge = el('span', { className: statusClass }, [f.state || 'open']);
+            summaryEl = el('span', { className: 'amp-fb-finding-summary' }, [link, badge]);
+          } else {
+            summaryEl = el('span', { className: 'amp-fb-finding-summary' }, [
+              f.title || f.summary || '',
+            ]);
+          }
+
+          var contentChildren = [summaryEl];
+          var detailHtml = buildFindingDetail(f, group.source);
+          if (detailHtml) {
+            var detailsEl = el('details', null);
+            detailsEl.appendChild(el('summary', null, ['Details']));
+            var inner = document.createElement('div');
+            inner.innerHTML = detailHtml;
+            detailsEl.appendChild(inner);
+            contentChildren.push(
+              el('div', { className: 'amp-fb-finding-detail' }, [detailsEl])
+            );
+          }
+
+          groupEl.appendChild(
+            el('div', { className: 'amp-fb-finding' }, [
+              cb,
+              el('div', { className: 'amp-fb-finding-content' }, contentChildren),
+            ])
+          );
+        });
+
+        analysisSection.appendChild(groupEl);
+      });
     }
 
     var backdrop = el('div', {
