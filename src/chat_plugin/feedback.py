@@ -40,10 +40,9 @@ def _find_transcript_path(projects_dir: Path | None, session_id: str) -> Path | 
     """Search across all project slugs for a session's transcript.jsonl."""
     if projects_dir is None:
         return None
-    projects = Path(projects_dir)
-    if not projects.is_dir():
+    if not projects_dir.is_dir():
         return None
-    for slug_dir in projects.iterdir():
+    for slug_dir in projects_dir.iterdir():
         if not slug_dir.is_dir():
             continue
         transcript = slug_dir / "sessions" / session_id / "transcript.jsonl"
@@ -123,6 +122,14 @@ async def _kick_off_execution(base_url: str, session_id: str, prompt: str) -> No
                 pass  # consume stream to completion
 
 
+async def _safe_kick_off(base_url: str, session_id: str, prompt: str) -> None:
+    """Wrap _kick_off_execution with logging so failures aren't silent."""
+    try:
+        await _kick_off_execution(base_url, session_id, prompt)
+    except Exception:
+        logger.exception("Background analysis failed for session %s", session_id)
+
+
 # ---------------------------------------------------------------------------
 # Route factory
 # ---------------------------------------------------------------------------
@@ -168,7 +175,10 @@ def create_feedback_routes(
         prompt = _build_analysis_prompt(
             body.session_id, transcript_path, daemon_session_path
         )
-        asyncio.create_task(_kick_off_execution(base_url, analysis_session_id, prompt))
+        asyncio.create_task(
+            _safe_kick_off(base_url, analysis_session_id, prompt),
+            name=f"analysis-{analysis_session_id}",
+        )
 
         return AnalyzeResponse(analysis_session_id=analysis_session_id)
 
