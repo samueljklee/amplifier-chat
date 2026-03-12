@@ -8,7 +8,6 @@ immediately so the UI can poll for results.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -57,38 +56,73 @@ def _build_analysis_prompt(
     transcript_path: Path,
     daemon_session_path: str | None,
 ) -> str:
-    """Build the analysis prompt with two tasks.
+    """Build the analysis prompt focused on infrastructure/harness failures.
 
-    TASK 1: search GitHub for related issues using ``gh issue list``.
-    TASK 2: analyse the session transcript and server logs.
+    This prompt ONLY looks for platform-level issues: LLM API errors,
+    tool execution failures, SSE connection problems, file I/O errors,
+    session lifecycle issues. It does NOT analyze the content of the
+    user's conversation or what they were discussing.
     """
-    output_schema = json.dumps(
-        {
-            "source": {
-                "github": {"issues": [{"number": "int", "title": "str", "url": "str"}]},
-                "session": {
-                    "session_id": "str",
-                    "summary": "str",
-                    "key_errors": ["str"],
-                },
-                "server_log": {"errors": [{"timestamp": "str", "message": "str"}]},
-            }
-        },
-        indent=2,
-    )
-
-    parts: list[str] = [
-        f"Analyse feedback for session {session_id}.\n",
-        "TASK 1 — GitHub issue search",
-        "Run: gh issue list --search '<keywords from transcript>' --json number,title,url",
-        f"Transcript path: {transcript_path}\n",
-        "TASK 2 — Session & server-log analysis",
-        f"Session transcript: {transcript_path}",
-    ]
+    server_log_section = ""
     if daemon_session_path:
-        parts.append(f"Server log: {daemon_session_path}")
-    parts.append(f"\nReturn results as JSON matching this schema:\n{output_schema}")
-    return "\n".join(parts)
+        server_log_section = f"""
+TASK 2 — Server log analysis
+Read the server log at: {daemon_session_path}/serve.log
+Search for entries correlated with session {session_id}:
+- HTTP 5xx responses
+- Connection errors (ConnectionResetError, BrokenPipeError)
+- SSE subscriber drops
+- Unhandled exceptions / tracebacks
+Include 2-3 surrounding context lines for each finding.
+If the file doesn't exist or has no relevant entries, skip this task."""
+
+    return f"""\
+You are analyzing session {session_id} for INFRASTRUCTURE FAILURES only.
+
+IMPORTANT: You are NOT analyzing what the user was discussing or the content
+of their conversation. You are looking for PLATFORM-LEVEL errors — things
+the Amplifier system did wrong, not what the user asked about.
+
+TASK 1 — Session transcript analysis
+Read the transcript at: {transcript_path}
+
+Look ONLY for these event types that indicate infrastructure failures:
+- tool:error events (tool execution failures, timeouts)
+- provider:error events (LLM API errors: 429, 500, 529, timeouts)
+- Unhandled exceptions with tracebacks
+- Session lifecycle errors (failed resume, failed spawn)
+- File I/O errors (permission denied, disk full, missing files)
+
+For each error found, preserve the ORIGINAL event data shape from the
+transcript. Extract the relevant stack trace frames (top 2-3 frames).
+
+DO NOT include:
+- The user's messages or what they asked about
+- The assistant's responses or reasoning
+- Tool calls that succeeded normally
+- Content-level analysis of the conversation topic
+{server_log_section}
+
+TASK 3 — GitHub issue search
+For each distinct error pattern found above, search for related issues:
+  gh issue list --repo microsoft/amplifier-distro --search "<error type or message>" \
+    --state all --limit 3 --json number,title,url,state
+
+If no errors were found in Tasks 1-2, skip this task.
+
+OUTPUT FORMAT
+Return a single flat JSON array. Output ONLY valid JSON — no markdown fences,
+no commentary, no explanation before or after. Just the array.
+
+Each item MUST have a "source" field: "github", "session", or "server_log".
+
+Item schemas:
+- GitHub: {{"source":"github","summary":"#N - title","url":"https://...","status":"open|closed","relevance":"why this matches"}}
+- Session: {{"source":"session","summary":"one-line","timestamp":"ISO","turn":N,"event_type":"tool:error|provider:error","event_data":{{original event data from transcript}},"error":{{"type":"ErrorType","message":"...","traceback":["frame1","frame2"]}}}}
+- Server log: {{"source":"server_log","summary":"one-line","timestamp":"ISO","log_level":"ERROR","log_line":"full line","context_lines":["surrounding lines"]}}
+
+If NO infrastructure errors found at all, output: []
+"""
 
 
 # ---------------------------------------------------------------------------

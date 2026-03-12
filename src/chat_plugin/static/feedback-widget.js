@@ -823,18 +823,19 @@
         return text;
       }
 
+      var deltaCount = 0;
       evtSource.addEventListener('content_block:delta', function (e) {
         try {
           var raw = JSON.parse(e.data);
           var text = extractDelta(raw);
+          deltaCount++;
+          if (deltaCount <= 3 || deltaCount % 50 === 0) {
+            console.log('[feedback-analysis] delta #' + deltaCount +
+              ' text=' + (text ? text.length + 'ch' : '(empty)') +
+              ' total=' + responseText.length + 'ch');
+          }
           if (text) {
             responseText += text;
-            // Check if we can see findings forming
-            var partial = extractFindings(responseText);
-            if (partial.length > foundingsCount) {
-              foundingsCount = partial.length;
-              addLogEntry('Found ' + foundingsCount + ' finding' + (foundingsCount > 1 ? 's' : '') + ' so far\u2026');
-            }
           }
         } catch (ex) { console.warn('[feedback-analysis] delta parse error:', ex); }
       });
@@ -989,7 +990,13 @@
     var backdrop = el('div', {
       className: 'amp-fb-backdrop',
       role: 'presentation',
-      onClick: function (e) { if (e.target === backdrop) { closeModal(); } },
+      onClick: function (e) {
+        if (e.target !== backdrop) return;
+        // If analysis is still running, ignore backdrop click
+        // (user must use Cancel or X button to dismiss intentionally)
+        if (!analysisComplete && analysisSessionId) return;
+        closeModal();
+      },
     });
 
     var titleInput = el('input', {
@@ -1115,7 +1122,11 @@
 
     // Keyboard handling
     function onKey(e) {
-      if (e.key === 'Escape') { closeModal(); }
+      if (e.key === 'Escape') {
+        // If analysis is running, ignore ESC (use Cancel or X button)
+        if (!analysisComplete && analysisSessionId) return;
+        closeModal();
+      }
       if (e.key === 'Tab') {
         // Simple focus trap
         var focusable = card.querySelectorAll(
