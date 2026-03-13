@@ -5300,6 +5300,14 @@
           }
 
           if (msg.block_type === 'text') {
+            // Defensive: clear any prior block stuck in streaming state
+            // (covers orphaned thinking blocks too — if one is still streaming
+            // when the text block starts, its content_stop was dropped)
+            setChronoItems(prev =>
+              prev.some(i => i.streaming)
+                ? prev.map(i => i.streaming ? { ...i, streaming: false } : i)
+                : prev
+            );
             const itemId = makeId();
             const localIdx = getLocalIndex(msg.index);
             blockMapRef.current['id-' + localIdx] = itemId;
@@ -5757,6 +5765,18 @@
             executingRef.current = false;
             tryDrainQueue();
           }
+          // Clean up mid-stream state orphaned by cancellation
+          blockMapRef.current = {};
+          cycleRef.current = 0;
+          localIndexRef.current = 0;
+          setChronoItems(prev =>
+            prev.some(i => i.streaming)
+              ? prev.map(i => i.streaming ? { ...i, streaming: false } : i)
+              : prev
+          );
+          for (const rafId of syntheticAnimRef.current.values()) cancelAnimationFrame(rafId);
+          syntheticAnimRef.current.clear();
+          seenDeltasRef.current.clear();
           break;
 
         case 'execution_error': {
@@ -5793,6 +5813,18 @@
             content: 'Warning: ' + (msg.error || 'Unknown error'),
             streaming: false, order: orderCounterRef.current++,
           }]);
+          // Clean up mid-stream state orphaned by error
+          blockMapRef.current = {};
+          cycleRef.current = 0;
+          localIndexRef.current = 0;
+          setChronoItems(prev =>
+            prev.some(i => i.streaming)
+              ? prev.map(i => i.streaming ? { ...i, streaming: false } : i)
+              : prev
+          );
+          for (const rafId of syntheticAnimRef.current.values()) cancelAnimationFrame(rafId);
+          syntheticAnimRef.current.clear();
+          seenDeltasRef.current.clear();
           break;
         }
 
