@@ -3822,7 +3822,7 @@
 
     function startCountdown(callback) {
       cancelCountdown(); // clear any existing countdown
-      let remaining = 3;
+      let remaining = 5;
       setCountdownRemaining(remaining);
       const tick = () => {
         remaining -= 1;
@@ -4817,6 +4817,12 @@
           blockMapRef.current = {};
           cycleRef.current = 0;
           localIndexRef.current = 0;
+          // Clean up any blocks stuck in streaming state (e.g. empty text blocks
+          // from thinking-only LLM responses where content_start fired but no content arrived)
+          setChronoItems(prev => {
+            const hasStuck = prev.some(item => item.streaming);
+            return hasStuck ? prev.map(item => item.streaming ? { ...item, streaming: false } : item) : prev;
+          });
           // E2: cancel any in-flight synthetic animations
           for (const rafId of syntheticAnimRef.current.values()) cancelAnimationFrame(rafId);
           syntheticAnimRef.current.clear();
@@ -4838,6 +4844,13 @@
           break;
 
         case 'execution_error': {
+          // "Already executing" means the server was still locked (e.g. naming hook).
+          // Don't show an error — just retry the drain after a delay.
+          if (msg.error && /already executing/i.test(msg.error)) {
+            setTimeout(() => tryDrainQueue(), 2000);
+            break;
+          }
+
           // Remove client-side placeholder if error occurs immediately
           const placeholderId = placeholderIdRef.current;
           if (placeholderId) {
