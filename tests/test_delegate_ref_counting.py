@@ -140,46 +140,53 @@ class TestToolResultDecrement:
 
 
 class TestPromptCompleteGuard:
-    def test_prompt_complete_has_delegate_and_session_guard(self):
-        """prompt_complete must have activeDelegatesRef + ownerKey guard for setExecuting/drain."""
-        content = html()
-        assert (
-            "if (activeDelegatesRef.current <= 0 && ownerKey === activeKeyRef.current)"
-            in content
-        )
-
-    def test_prompt_complete_set_executing_inside_delegate_guard(self):
-        """setExecuting(false) in prompt_complete must be inside activeDelegatesRef guard."""
+    def test_prompt_complete_resets_delegates_and_guards_with_owner_key(self):
+        """prompt_complete must reset activeDelegatesRef to 0 and guard setExecuting/drain with ownerKey."""
         content = html()
         prompt_complete_case = "case 'prompt_complete':"
         case_pos = content.find(prompt_complete_case)
         assert case_pos != -1, "prompt_complete case not found"
-        # Find the guard within the prompt_complete block
-        guard = (
-            "if (activeDelegatesRef.current <= 0 && ownerKey === activeKeyRef.current)"
+        next_case_pos = content.find("case '", case_pos + len(prompt_complete_case))
+        block = (
+            content[case_pos:next_case_pos]
+            if next_case_pos != -1
+            else content[case_pos : case_pos + 1000]
         )
+        assert "activeDelegatesRef.current = 0;" in block, (
+            "activeDelegatesRef.current = 0 not found in prompt_complete"
+        )
+        assert "if (ownerKey === activeKeyRef.current)" in block, (
+            "ownerKey guard not found in prompt_complete"
+        )
+
+    def test_prompt_complete_set_executing_inside_owner_key_guard(self):
+        """setExecuting(false) in prompt_complete must be inside ownerKey guard."""
+        content = html()
+        prompt_complete_case = "case 'prompt_complete':"
+        case_pos = content.find(prompt_complete_case)
+        assert case_pos != -1, "prompt_complete case not found"
+        # Find the simplified guard within the prompt_complete block
+        guard = "if (ownerKey === activeKeyRef.current)"
         guard_pos = content.find(guard, case_pos)
-        assert guard_pos != -1, "delegate+session guard not found in prompt_complete"
+        assert guard_pos != -1, "ownerKey guard not found in prompt_complete"
         # setExecuting(false) must appear inside the guard (within ~300 chars)
         nearby = content[guard_pos : guard_pos + 300]
         assert "setExecuting(false);" in nearby, (
-            f"setExecuting(false) not inside delegate guard: {nearby!r}"
+            f"setExecuting(false) not inside ownerKey guard: {nearby!r}"
         )
 
-    def test_prompt_complete_try_drain_queue_inside_delegate_guard(self):
-        """tryDrainQueue() in prompt_complete must be inside activeDelegatesRef guard."""
+    def test_prompt_complete_try_drain_queue_inside_owner_key_guard(self):
+        """tryDrainQueue() in prompt_complete must be inside ownerKey guard."""
         content = html()
         prompt_complete_case = "case 'prompt_complete':"
         case_pos = content.find(prompt_complete_case)
         assert case_pos != -1
-        guard = (
-            "if (activeDelegatesRef.current <= 0 && ownerKey === activeKeyRef.current)"
-        )
+        guard = "if (ownerKey === activeKeyRef.current)"
         guard_pos = content.find(guard, case_pos)
         assert guard_pos != -1
         nearby = content[guard_pos : guard_pos + 300]
         assert "tryDrainQueue();" in nearby, (
-            f"tryDrainQueue() not inside delegate guard: {nearby!r}"
+            f"tryDrainQueue() not inside ownerKey guard: {nearby!r}"
         )
 
 
@@ -189,23 +196,32 @@ class TestPromptCompleteGuard:
 
 
 class TestExecutionCancelledGuard:
-    def test_execution_cancelled_has_delegate_and_session_guard(self):
-        """execution_cancelled must guard setExecuting/drain with activeDelegatesRef + ownerKey."""
+    def test_execution_cancelled_resets_delegates_and_guards_with_owner_key(self):
+        """execution_cancelled must reset activeDelegatesRef to 0 and guard setExecuting/drain with ownerKey."""
         content = html()
         cancelled_case = "case 'execution_cancelled':"
         case_pos = content.find(cancelled_case)
         assert case_pos != -1, "execution_cancelled case not found"
-        guard = "if (activeDelegatesRef.current <= 0 && ownerKey === activeKeyRef.current)"
-        guard_pos = content.find(guard, case_pos)
-        assert guard_pos != -1, "delegate+session guard not found in execution_cancelled"
+        next_case_pos = content.find("case '", case_pos + len(cancelled_case))
+        block = (
+            content[case_pos:next_case_pos]
+            if next_case_pos != -1
+            else content[case_pos : case_pos + 1000]
+        )
+        assert "activeDelegatesRef.current = 0;" in block, (
+            "activeDelegatesRef.current = 0 not found in execution_cancelled"
+        )
+        assert "if (ownerKey === activeKeyRef.current)" in block, (
+            "ownerKey guard not found in execution_cancelled"
+        )
 
-    def test_execution_cancelled_set_executing_inside_guard(self):
-        """setExecuting(false) in execution_cancelled must be inside delegate guard."""
+    def test_execution_cancelled_set_executing_inside_owner_key_guard(self):
+        """setExecuting(false) in execution_cancelled must be inside ownerKey guard."""
         content = html()
         cancelled_case = "case 'execution_cancelled':"
         case_pos = content.find(cancelled_case)
         assert case_pos != -1
-        guard = "if (activeDelegatesRef.current <= 0 && ownerKey === activeKeyRef.current)"
+        guard = "if (ownerKey === activeKeyRef.current)"
         guard_pos = content.find(guard, case_pos)
         assert guard_pos != -1
         nearby = content[guard_pos : guard_pos + 300]
@@ -219,23 +235,32 @@ class TestExecutionCancelledGuard:
 
 
 class TestExecutionErrorGuard:
-    def test_execution_error_has_delegate_and_session_guard(self):
-        """execution_error must guard setExecuting/drain with activeDelegatesRef + ownerKey."""
+    def test_execution_error_resets_delegates_and_guards_with_owner_key(self):
+        """execution_error must reset activeDelegatesRef to 0 and guard setExecuting/drain with ownerKey."""
         content = html()
         error_case = "case 'execution_error':"
         case_pos = content.find(error_case)
         assert case_pos != -1, "execution_error case not found"
-        guard = "if (activeDelegatesRef.current <= 0 && ownerKey === activeKeyRef.current)"
-        guard_pos = content.find(guard, case_pos)
-        assert guard_pos != -1, "delegate+session guard not found in execution_error"
+        next_case_pos = content.find("case '", case_pos + len(error_case))
+        block = (
+            content[case_pos:next_case_pos]
+            if next_case_pos != -1
+            else content[case_pos : case_pos + 1000]
+        )
+        assert "activeDelegatesRef.current = 0;" in block, (
+            "activeDelegatesRef.current = 0 not found in execution_error"
+        )
+        assert "if (ownerKey === activeKeyRef.current)" in block, (
+            "ownerKey guard not found in execution_error"
+        )
 
-    def test_execution_error_set_executing_inside_guard(self):
-        """setExecuting(false) in execution_error must be inside delegate guard."""
+    def test_execution_error_set_executing_inside_owner_key_guard(self):
+        """setExecuting(false) in execution_error must be inside ownerKey guard."""
         content = html()
         error_case = "case 'execution_error':"
         case_pos = content.find(error_case)
         assert case_pos != -1
-        guard = "if (activeDelegatesRef.current <= 0 && ownerKey === activeKeyRef.current)"
+        guard = "if (ownerKey === activeKeyRef.current)"
         guard_pos = content.find(guard, case_pos)
         assert guard_pos != -1
         nearby = content[guard_pos : guard_pos + 300]
