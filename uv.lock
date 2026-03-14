@@ -98,7 +98,7 @@ wheels = [
 [[package]]
 name = "amplifier-foundation"
 version = "1.0.0"
-source = { git = "https://github.com/microsoft/amplifier-foundation#f70646b3fbcfeb353b054f5ee52daa0bff501876" }
+source = { git = "https://github.com/microsoft/amplifier-foundation?branch=main#0a3974053d7968851dbb062074fde27cb0a8dec8" }
 dependencies = [
     { name = "amplifier-core" },
     { name = "pyyaml" },
@@ -107,7 +107,7 @@ dependencies = [
 [[package]]
 name = "amplifierd"
 version = "0.1.0"
-source = { git = "https://github.com/microsoft/amplifierd#29d3e044a195bf40177a0a9ff82cbf419c53ce4d" }
+source = { git = "https://github.com/microsoft/amplifierd#7bbabb2103ea03b8ba59f4388ea6f334d05b243c" }
 dependencies = [
     { name = "amplifier-core" },
     { name = "amplifier-foundation" },
