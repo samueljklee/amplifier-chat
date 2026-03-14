@@ -222,6 +222,9 @@ def test_scan_sessions_not_hidden_by_default(tmp_path):
     assert results[0]["hidden"] is False
 
 
+# ── pinned_ids ───────────────────────────────────────────────────────────────
+
+
 def test_scan_sessions_pinned_priority(tmp_path):
     """Pinned sessions are returned separately, outside the pagination window."""
     import time
