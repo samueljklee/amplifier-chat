@@ -1,0 +1,190 @@
+# Shell Mode for Amplifier Chat
+
+**Date:** 2026-03-23
+**Status:** Design
+
+## Summary
+
+Add direct shell command execution to Amplifier Chat via a `!` prefix. When the user types `!` as the first character, the input area transforms into a terminal-like mode. On send, the command bypasses the AI entirely and executes directly. The output renders using the existing `ToolCallCard` component as a synthetic bash tool call, making the command and its output part of the session transcript so the AI can reference them on subsequent turns.
+
+## Motivation
+
+Users frequently need to run quick shell commands (git status, ls, grep) without waiting for an AI round-trip. Currently they must switch to a separate terminal. This feature keeps them in the chat flow while clearly distinguishing shell interactions from AI conversations.
+
+## Prior Art
+
+Research across Claude Code, Codex CLI, Cursor, Windsurf, and GitHub Copilot CLI showed two existing patterns:
+
+1. **AI-mediated execution** (Claude Code, Codex): The AI runs bash as tool calls. Output is part of the transcript. No user-initiated bypass.
+2. **Separate terminal pane** (Cursor, Windsurf): Terminal is a different view with optional "add to context" bridges.
+
+This design is novel: user-initiated shell execution rendered inline as synthetic tool calls, combining the contextual awareness of pattern 1 with the direct control of pattern 2.
+
+## Design
+
+### 1. Input Detection and Mode Switching
+
+When the user types `!` as the first character in the textarea, the input area immediately transitions into "shell mode."
+
+**Trigger:** `handleInput` detects the textarea value starts with `!` (and it's the first character, not mid-text).
+
+**Revert:** When the user deletes back past the `!` (textarea value no longer starts with `!`), the input reverts to normal chat mode.
+
+### 2. Input Area Visual Transformation ("Terminal Morph")
+
+The transition is animated with CSS transitions (~200ms ease-out) to feel responsive but not jarring.
+
+**Changes when shell mode activates:**
+
+| Element | Normal Mode | Shell Mode |
+|---------|-------------|------------|
+| Textarea border | `var(--border)`, blue on focus | `var(--accent-green)` with faint glow: `box-shadow: 0 0 8px rgba(34,197,94,0.15)` |
+| Textarea font | System font (inherited) | Monospace: `'SF Mono', 'Cascadia Code', 'Fira Code', monospace` |
+| Textarea content | User sees their text | The `!` prefix is hidden/consumed; a `$` prompt indicator appears to the left of the textarea (or as a pseudo-element/badge) |
+| Send button label | "Send" | "Run" |
+| Send button color | `var(--accent-blue)` | `var(--accent-green)` |
+| Placeholder | "Message... (/ for commands)" | "command..." |
+
+**CSS tokens (new):**
+
+```css
+:root {
+  --shell-border: var(--accent-green);
+  --shell-glow: rgba(34, 197, 94, 0.15);
+  --shell-font: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+}
+```
+
+**Light theme:** Same structure. The green border (`--accent-green` light variant: `#16a34a`) provides sufficient contrast on light backgrounds. Glow is reduced: `rgba(22, 163, 74, 0.1)`.
+
+**Animation spec:**
+
+- All properties transition with `200ms ease-out` on activation
+- Revert transitions with `150ms ease-in` (slightly faster feels natural)
+- Rapid toggling (type `!` then immediately delete): the shorter revert duration prevents visual stutter
+- Properties animated: `border-color`, `box-shadow`, `font-family`, `background-color` (send button), `color` (send button)
+
+### 3. Command Execution Flow
+
+When the user hits Enter (or clicks "Run") in shell mode:
+
+1. **Strip prefix:** Remove the `!` from the textarea value to get the raw command
+2. **Clear input:** Reset textarea, revert to normal mode
+3. **Send to backend:** POST to a new endpoint (or reuse `/command`) with the shell command
+4. **Inject synthetic SSE events:** The backend emits:
+   - `tool:pre` event with `{ name: 'bash', arguments: { command: '<the command>' } }`
+   - Execute the command
+   - `tool:post` event with the command output as the result
+5. **UI renders via existing `ToolCallCard`:** The command appears as a collapsible tool call card, identical to AI-initiated bash calls
+
+### 4. Output Rendering
+
+The output uses the existing `ToolCallCard` component with one addition:
+
+**User-initiated indicator:** The tool card header shows a small badge or label to distinguish user-initiated commands from AI-initiated ones.
+
+| Origin | Tool Header Display |
+|--------|-------------------|
+| AI-initiated bash | `bash` + arg preview |
+| User-initiated shell | `bash` + arg preview + `(user)` badge in `--text-muted` |
+
+The `(user)` badge is a `<span>` styled with muted color and smaller font, positioned after the tool name.
+
+**Existing rendering handles:**
+- Collapsible expand/collapse (click header to toggle)
+- `tool-result-text` for plain text output
+- `tool-result-smart` for markdown-formatted output
+- Error styling (`.tool-error-text`) for failed commands
+- Max-height with scroll for long output (`max-height: 300px; overflow: auto`)
+
+**Error states:** Non-zero exit codes render with the existing `tool-error-text` styling (red-tinted). The tool status icon shows error state.
+
+### 5. Transcript Integration
+
+The synthetic tool call events are injected into the session's event stream, making them part of the transcript. This means:
+
+- The AI can reference previous shell output on subsequent turns ("I see you ran `git status` and there are unstaged changes...")
+- Shell commands appear in session history when revisiting the session
+- The `transcriptToChronoItems` function already handles `tool_call` type items, so no changes needed to the transcript parser
+
+**Transcript structure of a shell command:**
+
+```json
+{
+  "role": "assistant",
+  "content": [
+    {
+      "type": "tool_use",
+      "name": "bash",
+      "input": { "command": "ls -la" },
+      "id": "user_shell_<uuid>",
+      "user_initiated": true
+    }
+  ]
+}
+```
+
+Followed by a tool result:
+
+```json
+{
+  "role": "tool",
+  "tool_use_id": "user_shell_<uuid>",
+  "content": "<command output>"
+}
+```
+
+The `user_initiated: true` flag allows the frontend to render the `(user)` badge and allows the backend to distinguish these from AI-initiated calls if needed.
+
+### 6. Backend Endpoint
+
+**Option A (preferred): New dedicated endpoint**
+
+```
+POST /api/sessions/{session_id}/shell
+Body: { "command": "ls -la" }
+Response: SSE stream with tool:pre, tool:post events
+```
+
+This keeps shell execution separate from the AI execution path (`/execute/stream`) while reusing the same SSE event format.
+
+**Option B: Extend the existing `/command` endpoint**
+
+Add a `shell` command type alongside existing slash commands. Less clean separation but fewer new routes.
+
+Recommendation: Option A for clean architecture.
+
+### 7. Security Considerations
+
+- Shell commands execute with the same permissions as the Amplifier Chat backend process
+- The same safety guardrails that apply to AI-initiated bash calls should apply here (blocked destructive commands, timeouts)
+- Commands should have a default timeout (30 seconds) with the output streamed as it arrives
+- No elevated privileges beyond what the user already has in their terminal
+
+### 8. Scope and Non-Goals
+
+**In scope:**
+- `!` prefix detection and input mode switching
+- Animated input transformation
+- Direct command execution (no AI round-trip)
+- Output rendering via existing `ToolCallCard`
+- Transcript integration
+- Backend shell execution endpoint
+- Light and dark theme support
+
+**Not in scope (future work):**
+- Command history / autocomplete in shell mode
+- Persistent shell session (each command is independent)
+- piping shell output to AI ("Share with AI" action)
+- Custom shell selection (always uses default shell)
+- Tab completion
+
+## Component Changes
+
+| File | Change |
+|------|--------|
+| `index.html` (CSS) | Add `.shell-mode` styles, CSS transitions, `$` prompt badge, new CSS tokens |
+| `index.html` (InputArea) | Detect `!` prefix in `handleInput`, toggle shell mode state, modify `doSend` to route shell commands |
+| `index.html` (ToolCallCard) | Add `(user)` badge rendering when `user_initiated` flag is present |
+| `routes.py` | New `/api/sessions/{session_id}/shell` endpoint |
+| Backend (new) | Shell execution logic with SSE event injection |
