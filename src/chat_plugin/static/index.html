@@ -2213,13 +2213,20 @@
     @keyframes mic-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } 50% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12); } }
     @media (prefers-reduced-motion: reduce) { .mic-btn.recording { animation: none; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1); } }
 
-    .recording-banner { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.2); border-radius: 8px; margin-bottom: 8px; font-size: 13px; color: var(--accent-red); }
-    .recording-banner .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-red); animation: rec-dot-pulse 2s ease-in-out infinite; flex-shrink: 0; }
-    .recording-banner .rec-timer { font-variant-numeric: tabular-nums; min-width: 32px; }
-    .recording-banner .rec-stop { background: none; border: 1px solid rgba(239, 68, 68, 0.3); color: var(--accent-red); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 12px; margin-left: auto; }
-    .recording-banner .rec-stop:hover { background: rgba(239, 68, 68, 0.1); }
-    @keyframes rec-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-    @media (prefers-reduced-motion: reduce) { .recording-banner .rec-dot { animation: none; } }
+    .recording-banner { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: rgba(239, 68, 68, 0.06); border: 1px solid rgba(239, 68, 68, 0.15); border-radius: 10px; margin-bottom: 8px; font-size: 13px; color: var(--accent-red); }
+    .recording-banner .rec-timer { font-variant-numeric: tabular-nums; min-width: 32px; font-size: 12px; color: var(--text-secondary); }
+    .recording-banner .rec-stop { background: none; border: 1px solid rgba(239, 68, 68, 0.3); color: var(--accent-red); border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; margin-left: auto; transition: background 0.15s, border-color 0.15s; }
+    .recording-banner .rec-stop:hover { background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.5); }
+
+    /* Audio waveform visualization */
+    .audio-waveform { display: flex; align-items: center; gap: 3px; height: 28px; flex: 1; min-width: 0; }
+    .audio-waveform .wave-bar { width: 4px; min-height: 4px; border-radius: 9999px; background: var(--accent-red); opacity: 0.55; transition: height 0.12s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.12s ease-out; will-change: height, opacity; }
+    .audio-waveform.idle .wave-bar { animation: wave-idle 2s ease-in-out infinite; }
+    .audio-waveform.idle .wave-bar:nth-child(odd) { animation-delay: -0.3s; }
+    .audio-waveform.idle .wave-bar:nth-child(3n) { animation-delay: -0.7s; }
+    .audio-waveform.idle .wave-bar:nth-child(5n) { animation-delay: -1.1s; }
+    @keyframes wave-idle { 0%, 100% { height: 3px; } 50% { height: 8px; } }
+    @media (prefers-reduced-motion: reduce) { .audio-waveform .wave-bar { transition: none; } .audio-waveform.idle .wave-bar { animation: none; height: 4px; } }
 
     .model-download-banner { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-tertiary); border: 1px solid var(--border-secondary); border-radius: 8px; margin-bottom: 6px; font-size: 13px; color: var(--text-secondary); }
     .model-download-banner .dl-info { flex: 1; }
@@ -4782,6 +4789,97 @@
     `;
   }
 
+  // ── Audio Waveform Visualization ─────────────────────────────────
+  function AudioWaveform({ analyserRef, barCount = 32 }) {
+    const barsRef = useRef([]);
+    const rafRef = useRef(null);
+    const containerRef = useRef(null);
+    const prevHeights = useRef(null);
+
+    useEffect(() => {
+      const draw = () => {
+        const analyser = analyserRef.current;
+        const bars = barsRef.current;
+        if (!analyser || !bars.length) {
+          rafRef.current = requestAnimationFrame(draw);
+          return;
+        }
+
+        // Use frequency data for spectral visualization
+        const bufLen = analyser.frequencyBinCount; // 128 with fftSize=256
+        const freqData = new Uint8Array(bufLen);
+        analyser.getByteFrequencyData(freqData);
+
+        // Also sample time-domain for overall energy (drives a global boost)
+        const timeData = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(timeData);
+        let rms = 0;
+        for (let j = 0; j < timeData.length; j++) {
+          const s = (timeData[j] - 128) / 128;
+          rms += s * s;
+        }
+        rms = Math.sqrt(rms / timeData.length);
+        const boost = Math.min(rms * 12, 1); // 0..1 energy multiplier (high gain)
+
+        const half = Math.ceil(bars.length / 2);
+        // Map each half-bar to a frequency bin, skipping DC (bin 0)
+        // Focus on speech range: bins 1..~40 (roughly 60Hz-3kHz at 44.1kHz)
+        const usableBins = Math.min(bufLen, 48);
+        const step = Math.max(1, usableBins / half);
+
+        if (!prevHeights.current) prevHeights.current = new Float32Array(bars.length).fill(4);
+
+        for (let i = 0; i < half; i++) {
+          // Average a small band of frequency bins for this bar
+          const binStart = Math.floor(1 + i * step);
+          const binEnd = Math.min(Math.floor(1 + (i + 1) * step), bufLen);
+          let sum = 0;
+          let count = 0;
+          for (let b = binStart; b < binEnd; b++) { sum += freqData[b]; count++; }
+          const avg = count > 0 ? sum / count / 255 : 0;
+
+          // Amplify: pow(x, 0.6) compresses range so quiet speech still shows
+          const amplified = Math.pow(avg, 0.45);
+          // Apply energy boost — even at rest the boost pushes bars up
+          const scaled = amplified * (0.5 + boost * 0.5);
+          const target = Math.max(4, scaled * 28);
+
+          // Smooth descent (bars fall slowly, rise fast)
+          const prev = prevHeights.current[i] || 3;
+          const h = target > prev ? target : prev * 0.88 + target * 0.12;
+          prevHeights.current[i] = h;
+
+          // Opacity: taller bars glow brighter (0.35 base → 1.0 at full height)
+          const opac = 0.35 + (h / 28) * 0.65;
+
+          // Mirror: left half = reversed, right half = normal
+          const leftIdx = half - 1 - i;
+          const rightIdx = half + i;
+          if (bars[leftIdx]) { bars[leftIdx].style.height = h + 'px'; bars[leftIdx].style.opacity = opac; }
+          if (rightIdx < bars.length && bars[rightIdx]) { bars[rightIdx].style.height = h + 'px'; bars[rightIdx].style.opacity = opac; }
+        }
+
+        rafRef.current = requestAnimationFrame(draw);
+      };
+
+      rafRef.current = requestAnimationFrame(draw);
+      return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+    }, [analyserRef]);
+
+    return html`
+      <div ref=${containerRef} class="audio-waveform">
+        ${Array.from({ length: barCount }, (_, i) => html`
+          <div
+            key=${i}
+            class="wave-bar"
+            ref=${el => { if (el) barsRef.current[i] = el; }}
+            style=${{ height: '3px' }}
+          />
+        `)}
+      </div>
+    `;
+  }
+
   function InputArea({ onSend, onStop, onQueueMessage, executing, shouldQueue, viewMode, setViewMode, activeKey, labsVoice }) {
     const textareaRef = useRef(null);
     const fileInputRef = useRef(null);
@@ -4801,6 +4899,8 @@
     const mediaRecorderRef = useRef(null);
     const audioChunksRef = useRef([]);
     const voiceTimerRef = useRef(null);
+    const analyserRef = useRef(null);
+    const audioCtxRef = useRef(null);
 
     useEffect(() => {
       const ta = textareaRef.current;
@@ -4983,6 +5083,12 @@
         mediaRecorderRef.current.stop();
       }
       clearInterval(voiceTimerRef.current);
+      // Clean up audio context
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+      }
+      analyserRef.current = null;
     }, []);
 
     const startRecording = useCallback(async () => {
@@ -5031,6 +5137,24 @@
           };
           reader.readAsDataURL(blob);
         };
+
+        // Set up Web Audio API analyser for waveform visualization
+        try {
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          // AudioContext may be suspended after await — force resume
+          if (audioCtx.state === 'suspended') await audioCtx.resume();
+          const source = audioCtx.createMediaStreamSource(stream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.55;
+          analyser.minDecibels = -60;
+          analyser.maxDecibels = -25;
+          source.connect(analyser);
+          audioCtxRef.current = audioCtx;
+          analyserRef.current = analyser;
+        } catch (e) {
+          console.warn('AudioContext not available for waveform:', e);
+        }
 
         // Pause any active TTS playback to prevent audio bleed into mic
         window.dispatchEvent(new CustomEvent('amplifier-voice-recording-start'));
@@ -5136,9 +5260,8 @@
         `}
         ${labsVoice && voiceState === 'recording' && html`
           <div class="recording-banner">
-            <span class="rec-dot"></span>
-            <span>Recording</span>
             <span class="rec-timer">${fmtVoiceTime(voiceDuration)}</span>
+            <${AudioWaveform} analyserRef=${analyserRef} barCount=${36} />
             <button class="rec-stop" onClick=${stopRecording}>Stop</button>
           </div>
         `}
