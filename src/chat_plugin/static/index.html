@@ -5517,7 +5517,7 @@
         setSlashActiveIndex(0);
       }
       // In shell mode, no slash detection — just let user type freely
-    }, [autoResize, shellMode]);
+    }, [autoResize, shellMode, labsShell]);
 
     const stopRecording = useCallback(() => {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
