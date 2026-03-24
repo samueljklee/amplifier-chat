@@ -2828,8 +2828,8 @@
       const resp = await fetch(`${API_BASE}/chat/api/sessions/history?limit=${limit}&offset=${offset}`);
       return resp.json();
     },
-    async searchSessions(query, limit = 20) {
-      const resp = await fetch(`${API_BASE}/chat/api/sessions/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+    async searchSessions(query, limit = 20, signal) {
+      const resp = await fetch(`${API_BASE}/chat/api/sessions/search?q=${encodeURIComponent(query)}&limit=${limit}`, signal ? { signal } : undefined);
       return resp.json();
     },
     async getSessionRevisions(payload) {
@@ -6476,6 +6476,7 @@
     const [serverSearchResults, setServerSearchResults] = useState([]);
     const [serverSearching, setServerSearching] = useState(false);
     const searchTimerRef = useRef(null);
+    const searchAbortRef = useRef(null);
     const [collapsedDirGroups, setCollapsedDirGroups] = useState({});
     const [collapsedSpawnGroups, setCollapsedSpawnGroups] = useState({});
     const [pinnedSessionIds, setPinnedSessionIds] = useState(new Set());
@@ -8531,11 +8532,12 @@
     // —— Send ————————————————————————————————————————————————————————
     // — Sub-session navigation —
     // Use a ref to access switchSession (defined later) without hook ordering issues
-    // Server-side search with debounce
-    // Only depends on sessionFilterQuery — NOT sessions (which changes on every load/click
-    // and would re-trigger the search API). We use sessionsRef inside the callback instead.
+    // Server-side search with debounce + cancellation.
+    // Aborts in-flight fetch when the user types a new query, so stale results
+    // from a previous search never overwrite fresher results.
     useEffect(() => {
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+      if (searchAbortRef.current) { searchAbortRef.current.abort(); searchAbortRef.current = null; }
       const query = sessionFilterQuery.trim();
       if (!query || query.length < 2) {
         setServerSearchResults([]);
@@ -8544,8 +8546,11 @@
       }
       setServerSearching(true);
       searchTimerRef.current = setTimeout(() => {
-        api.searchSessions(query)
+        const abort = new AbortController();
+        searchAbortRef.current = abort;
+        api.searchSessions(query, 20, abort.signal)
           .then(data => {
+            if (abort.signal.aborted) return;
             const rows = Array.isArray(data?.sessions) ? data.sessions : [];
             const loadedIds = new Set();
             for (const [, s] of sessionsRef.current.entries()) {
@@ -8553,10 +8558,13 @@
             }
             setServerSearchResults(rows.filter(r => !loadedIds.has(r.session_id)));
           })
-          .catch(() => setServerSearchResults([]))
-          .finally(() => setServerSearching(false));
+          .catch((err) => { if (!abort.signal.aborted) setServerSearchResults([]); })
+          .finally(() => { if (!abort.signal.aborted) setServerSearching(false); });
       }, 300);
-      return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current); };
+      return () => {
+        if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+        if (searchAbortRef.current) { searchAbortRef.current.abort(); searchAbortRef.current = null; }
+      };
     }, [sessionFilterQuery]);
 
     // Pending switch target: set by loadServerSearchResult, consumed by useEffect
