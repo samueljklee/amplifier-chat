@@ -442,7 +442,9 @@ def create_shell_routes(session_manager: Any) -> APIRouter:
         if not command:
             raise HTTPException(status_code=400, detail="Empty command")
 
-        cwd = body.get("cwd") or None
+        cwd = (body.get("cwd") or "").strip()
+        if not cwd:
+            raise HTTPException(status_code=400, detail="cwd is required")
 
         async def event_stream():
             async for event in execute_shell_command(command, cwd=cwd):

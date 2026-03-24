@@ -23,7 +23,9 @@ async def execute_shell_command(
     with the final result and exit code.
     """
     tool_call_id = f"user_shell_{uuid.uuid4().hex[:12]}"
-    resolved_cwd = cwd or str(Path.home())
+    if not cwd:
+        raise ValueError("cwd is required for shell execution")
+    resolved_cwd = cwd
 
     # Resolve ~ in cwd
     if resolved_cwd.startswith("~"):
