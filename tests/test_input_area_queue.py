@@ -29,7 +29,7 @@ class TestTask3InputAreaSignature:
     def test_inputarea_signature_has_onqueuemessage(self, html_content):
         """InputArea function signature includes onQueueMessage prop (queueCount removed as unused)."""
         assert (
-            "function InputArea({ onSend, onStop, onQueueMessage, onShellExecute, executing, shouldQueue, viewMode, setViewMode, activeKey, labsVoice })"
+            "function InputArea({ onSend, onStop, onQueueMessage, onShellExecute, executing, shouldQueue, viewMode, setViewMode, activeKey, labsVoice, labsShell })"
             in html_content
         )
 
@@ -78,13 +78,10 @@ class TestTask4DoSendQueueRouting:
 
 class TestTask5TextareaEnabled:
     def test_textarea_placeholder_says_queue(self, html_content):
-        """Textarea placeholder says 'Queue a message…' when shouldQueue is true."""
-        assert (
-            'placeholder=${shouldQueue ? "Queue a message\\u2026" : "Message\\u2026 (/ for commands)"}'
-            in html_content
-            or 'placeholder=${shouldQueue ? "Queue a message\u2026" : "Message\u2026 (/ for commands)"}'
-            in html_content
-        )
+        """Textarea placeholder mentions Queue when shouldQueue, and includes shell hint when labsShell."""
+        assert "Queue a message" in html_content
+        assert "/ commands" in html_content
+        assert "! shell" in html_content
 
     def test_textarea_not_disabled(self, html_content):
         """Textarea no longer has disabled=${executing} attribute."""
