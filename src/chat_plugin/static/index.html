@@ -139,6 +139,17 @@
     .btn:hover { background: var(--bg-card); color: var(--text-primary); }
     .btn.active { border-color: var(--accent-blue); color: var(--accent-blue); }
 
+    /* All header icon buttons — consistent sizing */
+    .btn.header-icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 28px;
+      padding: 0;
+      flex-shrink: 0;
+    }
+    .btn.header-icon-btn svg { flex-shrink: 0; }
     /* Split view toggle (icon-only) */
     .split-toggle {
       display: inline-flex;
@@ -2410,7 +2421,7 @@
     @keyframes dl-indeterminate { 0% { width: 0%; margin-left: 0; } 50% { width: 60%; margin-left: 20%; } 100% { width: 0%; margin-left: 100%; } }
 
     /* ── Experimental Features Drawer ─────────────────── */
-    .labs-btn { position: relative; }
+    .labs-btn { position: relative; width: 32px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
     .labs-btn .labs-indicator { position: absolute; top: 4px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-blue); }
 
     .labs-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 499; opacity: 0; transition: opacity 0.2s ease; }
@@ -2691,8 +2702,9 @@
 
     .cmd-palette-trigger {
       display: inline-flex; align-items: center; justify-content: center;
-      gap: 4px; padding: 4px 8px;
+      width: 32px; height: 28px; padding: 0;
     }
+    .cmd-palette-trigger.has-hint { width: auto; padding: 0 8px; gap: 4px; }
     .cmd-palette-trigger-hint { font-size: 11px; opacity: 0.6; }
 
     @media (max-width: 768px) {
@@ -10048,7 +10060,7 @@
         <span class="app-name">Amplifier</span>
         <span class="header-spacer"></span>
         <button
-          class=${'btn split-toggle' + (viewMode === 'workspace' ? ' active' : '')}
+          class=${'btn header-icon-btn split-toggle' + (viewMode === 'workspace' ? ' active' : '')}
           title=${viewMode === 'workspace' ? 'Single column' : 'Split view'}
           aria-label=${viewMode === 'workspace' ? 'Switch to single column view' : 'Switch to split view'}
           onClick=${() => setViewMode(m => m === 'workspace' ? 'chat' : 'workspace')}
@@ -10058,20 +10070,12 @@
             : html`<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="2" width="12" height="12" rx="1.5"/><line x1="9" y1="2" x2="9" y2="14"/></svg>`
           }
         </button>
-        <button class="btn cmd-palette-trigger" title=${'Actions (' + fmtShortcut('Mod+k') + ')'} onClick=${() => setCmdPaletteOpen(true)}>
+        <button class=${'btn header-icon-btn cmd-palette-trigger' + (fmtShortcut('Mod+k') ? ' has-hint' : '')} title=${'Actions (' + fmtShortcut('Mod+k') + ')'} onClick=${() => setCmdPaletteOpen(true)}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
           <span class="cmd-palette-trigger-hint">${fmtShortcut('Mod+k')}</span>
         </button>
-        <button class="btn labs-btn" title="Experimental features" onClick=${() => setLabsOpen(true)}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 3h6v7l4.5 7.5A2 2 0 0 1 17.77 21H6.23a2 2 0 0 1-1.73-3.5L9 10z"></path>
-            <path d="M9 3h6"></path>
-          </svg>
-          ${hasLabsActive && html`<span class="labs-indicator"></span>`}
-        </button>
-        <span ref=${feedbackSlotRef}></span>
         <button
-          class="btn theme-toggle"
+          class="btn header-icon-btn theme-toggle"
           title=${theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
           onClick=${() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
         >
@@ -10094,6 +10098,14 @@
             </svg>
           </span>
         </button>
+        <button class="btn header-icon-btn labs-btn" title="Experimental features" onClick=${() => setLabsOpen(true)}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 3h6v7l4.5 7.5A2 2 0 0 1 17.77 21H6.23a2 2 0 0 1-1.73-3.5L9 10z"></path>
+            <path d="M9 3h6"></path>
+          </svg>
+          ${hasLabsActive && html`<span class="labs-indicator"></span>`}
+        </button>
+        <span ref=${feedbackSlotRef}></span>
       </div>
 
       <div id="app-body">
