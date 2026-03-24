@@ -8538,6 +8538,16 @@
       let activeSession = key ? sessionsRef.current.get(key) : null;
       let sessionId = activeSession?.sessionId || null;
 
+      // Block shell on history sessions that haven't been resumed yet
+      if (sessionId && activeSession?.source === 'history') {
+        setChronoItems(prev => [...prev, {
+          id: makeId(), type: 'text', role: 'system',
+          content: 'Session is still loading. Please wait a moment and try again.',
+          streaming: false, order: orderCounterRef.current++,
+        }]);
+        return;
+      }
+
       // Lazy session creation (same as sendMessage)
       if (!sessionId) {
         sessionId = await connect(key);
@@ -8552,7 +8562,12 @@
         activeSession = sessionsRef.current.get(activeKeyRef.current);
       }
 
-      const cwd = activeSession?.cwd || activeSession?.serverCwd || getRequestedCwd();
+      // CWD resolution: session metadata -> server-reported -> CWD picker value
+      // Avoid '~' from history sessions with missing metadata — prefer the
+      // user's configured default CWD from the picker in that case.
+      let cwd = activeSession?.cwd;
+      if (!cwd || cwd === '~') cwd = activeSession?.serverCwd;
+      if (!cwd || cwd === '~') cwd = getRequestedCwd();
 
       // Show the command as a user message in the chat
       setChronoItems(prev => [...prev, {
