@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from chat_plugin.commands import CommandProcessor
 from chat_plugin.pin_storage import PinStorage
+from chat_plugin.session_utils import patch_forked_metadata
 from chat_plugin.session_history import (
     VALID_SESSION_ID_RE,
     scan_session_revisions,
@@ -120,7 +121,7 @@ def create_history_routes(
         return {
             "sessions": pinned_sessions + sessions,
             "total_count": total_count,
-            "has_more": offset + limit < total_count,
+            "has_more": len(sessions) == limit,
             "pinned_count": len(pinned_sessions),
         }
 
@@ -139,6 +140,9 @@ def create_history_routes(
             ) and not row.get("hidden")
 
         results = [row for row in results if _has_content(row)]
+        pinned_ids = pin_storage.list_pins()
+        for row in results:
+            row["pinned"] = row["session_id"] in pinned_ids
         return {"sessions": results, "query": q}
 
     @router.get("/api/sessions/revisions")
@@ -325,53 +329,6 @@ def create_fork_routes(
     """Fork-from-message endpoints: preview + execute."""
     router = APIRouter(prefix="/chat", tags=["chat-fork"])
 
-    def _patch_forked_metadata(
-        forked_dir: Path,
-        parent_dir: Path,
-        cwd: str | None,
-    ) -> None:
-        """Patch the forked session's metadata.json with working_dir and
-        any fields that fork_session() left as null (e.g. bundle)."""
-        meta_path = forked_dir / "metadata.json"
-        try:
-            meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-        except (json.JSONDecodeError, OSError):
-            meta = {}
-
-        # Read parent metadata for fallback values
-        parent_meta: dict = {}
-        parent_meta_path = parent_dir / "metadata.json"
-        try:
-            parent_meta = json.loads(parent_meta_path.read_text())
-        except (json.JSONDecodeError, OSError, FileNotFoundError):
-            pass
-
-        changed = False
-
-        # Patch working_dir
-        if not cwd:
-            cwd = parent_meta.get("working_dir") or parent_meta.get("cwd")
-        if cwd:
-            meta["working_dir"] = cwd
-            changed = True
-
-        # Patch bundle if null (fork_session may have copied null from parent
-        # if metadata was written before the daemon set the bundle field).
-        if not meta.get("bundle") and parent_meta.get("bundle"):
-            meta["bundle"] = parent_meta["bundle"]
-            changed = True
-
-        # Patch model if null
-        if not meta.get("model") and parent_meta.get("model"):
-            meta["model"] = parent_meta["model"]
-            changed = True
-
-        if changed:
-            try:
-                meta_path.write_text(json.dumps(meta, indent=2) + "\n")
-            except OSError:
-                pass  # best-effort
-
     def _find_session_dir(session_id: str) -> Path:
         if projects_dir is None:
             raise HTTPException(status_code=500, detail="projects_dir not configured")
@@ -435,7 +392,7 @@ def create_fork_routes(
             result = await asyncio.to_thread(fork_session, session_dir, turn=turn)
 
             if result.session_dir:
-                _patch_forked_metadata(result.session_dir, session_dir, cwd)
+                patch_forked_metadata(result.session_dir, session_dir, cwd)
 
             return {
                 "session_id": result.session_id,

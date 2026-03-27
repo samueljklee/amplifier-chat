@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 class _MockSettings:
-    sessions_dir: Path | None = None
+    projects_dir: Path | None = None
 
 
 class _MockState:
@@ -31,10 +31,10 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8410)
     parser.add_argument(
-        "--sessions-dir",
+        "--projects-dir",
         type=Path,
         default=None,
-        help="Path to sessions directory for history scanning",
+        help="Path to projects directory for history scanning",
     )
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
@@ -46,8 +46,8 @@ def main() -> None:
     from chat_plugin import create_router
 
     state = _MockState()
-    if args.sessions_dir:
-        state.settings.sessions_dir = args.sessions_dir
+    if args.projects_dir:
+        state.settings.projects_dir = args.projects_dir
 
     app = FastAPI(title="amplifier-chat (dev)")
     app.include_router(create_router(state))
