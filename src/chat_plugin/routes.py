@@ -120,7 +120,7 @@ def create_history_routes(
         return {
             "sessions": pinned_sessions + sessions,
             "total_count": total_count,
-            "has_more": offset + limit < total_count,
+            "has_more": len(sessions) == limit,
             "pinned_count": len(pinned_sessions),
         }
 

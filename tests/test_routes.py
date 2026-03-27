@@ -113,6 +113,62 @@ def test_history_with_sessions_on_disk(client, tmp_path, state):
     assert "total_count" in data
 
 
+def test_has_more_accounts_for_filtering(client, tmp_path, state):
+    """S-14: has_more should reflect filtered results, not raw disk count.
+
+    When the pagination window contains sessions that get filtered out,
+    the resulting page is under-full. has_more should be False because
+    we did not fill the page, rather than True based on raw disk count.
+    """
+    import json
+    import time
+
+    state.settings.projects_dir = tmp_path
+
+    # Create content session first (will have oldest mtime)
+    content_dir = tmp_path / "-Users-test" / "sessions" / "sess-content"
+    content_dir.mkdir(parents=True, exist_ok=True)
+    (content_dir / "transcript.jsonl").write_text(
+        json.dumps({"role": "user", "content": "hi"}) + "\n",
+        encoding="utf-8",
+    )
+    time.sleep(0.02)
+
+    # Create empty session (middle mtime — will be in window before content)
+    empty_dir = tmp_path / "-Users-test" / "sessions" / "sess-empty"
+    empty_dir.mkdir(parents=True, exist_ok=True)
+    (empty_dir / "transcript.jsonl").write_text("", encoding="utf-8")
+    time.sleep(0.02)
+
+    # Create another content session (newest mtime — first in window)
+    content2_dir = tmp_path / "-Users-test" / "sessions" / "sess-content2"
+    content2_dir.mkdir(parents=True, exist_ok=True)
+    (content2_dir / "transcript.jsonl").write_text(
+        json.dumps({"role": "user", "content": "hello"}) + "\n",
+        encoding="utf-8",
+    )
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from chat_plugin import create_router
+
+    app = FastAPI()
+    router = create_router(state)
+    app.include_router(router)
+    c = TestClient(app)
+
+    # limit=2, offset=0: window = [content2 (newest), empty (middle)]
+    # After filtering, only content2 survives → len=1 < limit=2
+    # Old: 0+2 < 3 → True (BUG: falsely claims more filtered results)
+    # New: 1 == 2 → False (correct: page underfull)
+    resp = c.get("/chat/api/sessions/history?limit=2&offset=0")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["has_more"] is False, (
+        "has_more should be False when filtered results don't fill the page"
+    )
+
+
 def test_history_returns_pinned_sessions_beyond_page(client, tmp_path, state):
     """Pinned sessions outside the pagination window are still returned."""
     import json
