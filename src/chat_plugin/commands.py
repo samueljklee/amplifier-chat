@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from chat_plugin.session_utils import patch_forked_metadata
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,48 +64,6 @@ class CommandProcessor:
         if handler is None:
             return {"type": "error", "error": f"Unknown command: /{command}"}
         return handler(args, session_id=session_id)
-
-    @staticmethod
-    def _patch_forked_metadata(forked_dir: Path, parent_dir: Path, handle: Any) -> None:
-        """Patch forked session's metadata with working_dir and any fields
-        that fork_session() left as null (e.g. bundle, model)."""
-        import json
-
-        meta_path = forked_dir / "metadata.json"
-        try:
-            meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-        except (json.JSONDecodeError, OSError):
-            meta = {}
-
-        parent_meta: dict = {}
-        parent_meta_path = parent_dir / "metadata.json"
-        try:
-            parent_meta = json.loads(parent_meta_path.read_text())
-        except (json.JSONDecodeError, OSError, FileNotFoundError):
-            pass
-
-        changed = False
-
-        cwd = getattr(handle, "working_dir", None)
-        if not cwd:
-            cwd = parent_meta.get("working_dir") or parent_meta.get("cwd")
-        if cwd:
-            meta["working_dir"] = str(cwd)
-            changed = True
-
-        if not meta.get("bundle") and parent_meta.get("bundle"):
-            meta["bundle"] = parent_meta["bundle"]
-            changed = True
-
-        if not meta.get("model") and parent_meta.get("model"):
-            meta["model"] = parent_meta["model"]
-            changed = True
-
-        if changed:
-            try:
-                meta_path.write_text(json.dumps(meta, indent=2) + "\n")
-            except OSError:
-                pass
 
     def _find_session_dir(self, session_id: str) -> Path | None:
         """Locate session directory on disk by scanning projects_dir."""
@@ -397,7 +357,12 @@ class CommandProcessor:
             result = fork_session(session_dir, turn=turn)
 
             if result.session_dir:
-                self._patch_forked_metadata(result.session_dir, session_dir, handle)
+                cwd = (
+                    str(handle.working_dir)
+                    if getattr(handle, "working_dir", None)
+                    else None
+                )
+                patch_forked_metadata(result.session_dir, session_dir, cwd)
 
             return {
                 "type": "forked",
