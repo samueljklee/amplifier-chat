@@ -303,8 +303,11 @@ def create_command_routes(processor: CommandProcessor) -> APIRouter:
         text = body.get("command", body.get("text", ""))
         action, data = processor.process_input(text)
         if action == "command":
-            result = processor.handle_command(
-                data["command"], data["args"], session_id=session_id
+            result = await asyncio.to_thread(
+                processor.handle_command,
+                data["command"],
+                data["args"],
+                session_id=session_id,
             )
             return result
         return {"type": "prompt", "data": data}
