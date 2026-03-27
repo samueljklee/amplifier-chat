@@ -191,6 +191,9 @@ def create_voice_routes() -> APIRouter:
         settings = _load_voice_settings()
         model_name = body.get("model", settings.get("stt_model", DEFAULT_STT_MODEL))
 
+        if model_name not in STT_MODELS:
+            raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+
         if not audio_data_b64:
             raise HTTPException(status_code=400, detail="Missing 'audio_data' field")
 
@@ -354,6 +357,9 @@ def create_voice_routes() -> APIRouter:
         body = await request.json() if await request.body() else {}
         model_name = body.get("model", DEFAULT_STT_MODEL)
 
+        if model_name not in STT_MODELS:
+            raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+
         models_dir = _models_dir()
         model_file = models_dir / f"ggml-{model_name}.bin"
 
@@ -404,6 +410,9 @@ def create_voice_routes() -> APIRouter:
 
         body = await request.json() if await request.body() else {}
         model_name = body.get("model", DEFAULT_STT_MODEL)
+
+        if model_name not in STT_MODELS:
+            raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
 
         model_file = _models_dir() / f"ggml-{model_name}.bin"
 
