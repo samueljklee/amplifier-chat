@@ -8,6 +8,7 @@ import io
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -37,6 +38,7 @@ except ImportError:
 # Model cache (singleton — loaded once, reused across requests)
 _whisper_model: WhisperModel | None = None
 _whisper_model_name: str = ""
+_whisper_lock = threading.Lock()
 
 # Default config
 DEFAULT_STT_MODEL = "base"
@@ -88,28 +90,35 @@ def _models_dir() -> Path:
 def _get_whisper_model(model_name: str) -> WhisperModel:
     """Get or create the whisper model (thread-safe singleton)."""
     global _whisper_model, _whisper_model_name
+
+    # Fast path — no lock needed for the common case
     if _whisper_model is not None and _whisper_model_name == model_name:
         return _whisper_model
 
-    # Check if model file exists, download if not
-    models_dir = _models_dir()
-    model_file = models_dir / f"ggml-{model_name}.bin"
+    with _whisper_lock:
+        # Re-check after acquiring the lock (double-check locking)
+        if _whisper_model is not None and _whisper_model_name == model_name:
+            return _whisper_model
 
-    if not model_file.exists():
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "model_not_downloaded",
-                "model": model_name,
-                "message": f"Whisper model '{model_name}' not found. Use POST /chat/voice/download-model to download it first.",
-            },
+        # Check if model file exists, download if not
+        models_dir = _models_dir()
+        model_file = models_dir / f"ggml-{model_name}.bin"
+
+        if not model_file.exists():
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "model_not_downloaded",
+                    "model": model_name,
+                    "message": f"Whisper model '{model_name}' not found. Use POST /chat/voice/download-model to download it first.",
+                },
+            )
+
+        _whisper_model = WhisperModel(
+            str(model_file), n_threads=min(os.cpu_count() or 4, 8)
         )
-
-    _whisper_model = WhisperModel(
-        str(model_file), n_threads=min(os.cpu_count() or 4, 8)
-    )
-    _whisper_model_name = model_name
-    return _whisper_model
+        _whisper_model_name = model_name
+        return _whisper_model
 
 
 def _convert_audio_to_wav(audio_bytes: bytes, audio_format: str) -> bytes:
@@ -323,6 +332,8 @@ def create_voice_routes() -> APIRouter:
     @router.post("/voice/settings")
     async def update_voice_settings(request: Request):
         """Update voice settings (active model, voice)."""
+        global _whisper_model, _whisper_model_name
+
         body = await request.json()
         settings = _load_voice_settings()
 
@@ -338,9 +349,9 @@ def create_voice_routes() -> APIRouter:
                 )
             settings["stt_model"] = model
             # Clear cached model so next transcription loads the new one
-            global _whisper_model, _whisper_model_name
-            _whisper_model = None
-            _whisper_model_name = ""
+            with _whisper_lock:
+                _whisper_model = None
+                _whisper_model_name = ""
 
         if "tts_voice" in body:
             settings["tts_voice"] = body["tts_voice"]
@@ -425,9 +436,10 @@ def create_voice_routes() -> APIRouter:
         model_file.unlink()
 
         # Clear cached model if it was the one deleted
-        if _whisper_model_name == model_name:
-            _whisper_model = None
-            _whisper_model_name = ""
+        with _whisper_lock:
+            if _whisper_model_name == model_name:
+                _whisper_model = None
+                _whisper_model_name = ""
 
         # If deleted model was the active one, reset to default
         settings = _load_voice_settings()

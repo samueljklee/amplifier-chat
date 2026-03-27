@@ -1,8 +1,19 @@
-"""Tests for voice settings atomicity."""
+"""Tests for voice settings atomicity and thread safety."""
 
 import json
-from pathlib import Path
 from unittest.mock import patch
+
+
+def test_whisper_lock_exists():
+    """S-18: voice.py must have a module-level _whisper_lock for thread safety."""
+    import threading
+
+    from chat_plugin import voice
+
+    assert hasattr(voice, "_whisper_lock"), (
+        "voice.py must define _whisper_lock = threading.Lock()"
+    )
+    assert isinstance(voice._whisper_lock, type(threading.Lock()))
 
 
 def test_save_voice_settings_uses_atomic_write(tmp_path):
