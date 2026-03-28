@@ -326,3 +326,100 @@ class TestRegisterAsync:
         ids = {s["session_id"] for s in sessions}
         assert "sess-list-001" in ids
         assert "sess-list-002" in ids
+
+
+# ---------------------------------------------------------------------------
+# TestLoadProviderConfigUsesAsyncioToThread
+# ---------------------------------------------------------------------------
+
+
+class TestLoadProviderConfigUsesAsyncioToThread:
+    """load_provider_config() must be called via asyncio.to_thread in create() and resume()."""
+
+    @pytest.mark.asyncio
+    async def test_create_uses_to_thread_for_load_provider_config(self):
+        """create() must call asyncio.to_thread(load_provider_config) on the slow path."""
+        sm = _make_session_manager()
+        session = _make_fake_session()
+        prepared = _make_prepared(session)
+
+        # Force the slow path by NOT pre-warming the bundle cache
+        bundle = MagicMock()
+        bundle.prepare = AsyncMock(return_value=prepared)
+        registry = MagicMock()
+        registry.load = AsyncMock(return_value=bundle)
+        sm._bundle_registry = registry
+
+        # Capture actual callables passed to asyncio.to_thread
+        to_thread_callables = []
+
+        async def tracking(fn, *args, **kwargs):
+            to_thread_callables.append(fn)
+            return fn(*args, **kwargs)
+
+        with (
+            patch("asyncio.to_thread", new=tracking),
+            patch(
+                "amplifierd.providers.load_provider_config", return_value=[]
+            ) as mock_lpc,
+            patch("amplifierd.providers.inject_providers"),
+            patch(
+                "amplifierd.spawn.register_spawn_capability", side_effect=ImportError
+            ),
+            patch("amplifierd.threading.wrap_tools_for_threading"),
+        ):
+            await sm.create(bundle_name="my-bundle")
+
+        assert mock_lpc in to_thread_callables, (
+            "create() must call asyncio.to_thread(load_provider_config), not call it directly"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_uses_to_thread_for_load_provider_config(self, tmp_path):
+        """resume() must call asyncio.to_thread(load_provider_config) on the slow path."""
+        sm = _make_session_manager(projects_dir=tmp_path)
+        session = _make_fake_session("sess-resume-tothread-001")
+        session.coordinator.get.return_value = None
+        prepared = _make_prepared(session)
+
+        # Force the slow path by NOT pre-warming the bundle cache
+        bundle = MagicMock()
+        bundle.prepare = AsyncMock(return_value=prepared)
+        registry = MagicMock()
+        registry.load = AsyncMock(return_value=bundle)
+        sm._bundle_registry = registry
+
+        session_dir = tmp_path / "proj" / "sessions" / "sess-resume-tothread-001"
+        session_dir.mkdir(parents=True)
+        working_dir = str(tmp_path / "work")
+
+        # Capture actual callables passed to asyncio.to_thread
+        to_thread_callables = []
+
+        async def tracking(fn, *args, **kwargs):
+            to_thread_callables.append(fn)
+            return fn(*args, **kwargs)
+
+        with (
+            patch.object(sm, "_find_session_dir", return_value=session_dir),
+            patch("amplifierd.persistence.load_transcript", return_value=[]),
+            patch(
+                "amplifierd.persistence.load_metadata",
+                return_value={"bundle": "my-bundle", "working_dir": working_dir},
+            ),
+            patch("asyncio.to_thread", new=tracking),
+            patch(
+                "amplifierd.providers.load_provider_config", return_value=[]
+            ) as mock_lpc,
+            patch("amplifierd.providers.inject_providers"),
+            patch("amplifierd.persistence.register_persistence_hooks"),
+            patch(
+                "amplifierd.spawn.register_spawn_capability", side_effect=ImportError
+            ),
+            patch("amplifierd.threading.wrap_tools_for_threading"),
+        ):
+            await sm.resume("sess-resume-tothread-001")
+
+        assert mock_lpc in to_thread_callables, (
+            "resume() must call asyncio.to_thread(load_provider_config), not call it directly"
+        )
