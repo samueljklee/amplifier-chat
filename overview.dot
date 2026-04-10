@@ -1,0 +1,364 @@
+// amplifier-chat — System-Spine Overview
+// Synthesized from: plugin-integration, session-lifecycle, api-route-layer,
+//                   frontend-data-contract, voice-subsystem module diagrams
+// Node count: 15  |  Clusters: 5 + legend
+// Layout engine: dot  |  rankdir: TB
+
+digraph amplifier_chat_overview {
+    rankdir=TB;
+    compound=true;
+    fontname="Helvetica";
+    fontsize=13;
+    label="amplifier-chat — System-Spine Overview\nFastAPI chat UI plugin for the amplifierd AI agent platform";
+    labelloc=t;
+    nodesep=0.75;
+    ranksep=1.0;
+
+
+    node [fontname="Helvetica", fontsize=10, style="filled,rounded", shape=box];
+    edge [fontname="Helvetica", fontsize=9];
+
+    // ===================================================================
+    // LEGEND
+    // ===================================================================
+    subgraph cluster_legend {
+        label="Legend";
+        style=dashed;
+        color="#999999";
+        fontcolor="#999999";
+        fontsize=9;
+
+        leg_browser  [label="Browser / Actor",   shape=note,      fillcolor="#E3F2FD", fontsize=8];
+        leg_daemon   [label="Daemon Layer",       shape=box,       fillcolor="#FFCDD2", fontsize=8];
+        leg_plugin   [label="Plugin Layer",       shape=box,       fillcolor="#C8E6C9", fontsize=8];
+        leg_state    [label="State / Runtime",    shape=box,       fillcolor="#C5CAE9", fontsize=8];
+        leg_event    [label="Event / Hook",       shape=hexagon,   fillcolor="#FFF9C4", fontsize=8];
+        leg_disk     [label="Disk Storage",       shape=cylinder,  fillcolor="#FFE0B2", fontsize=8];
+        leg_ext      [label="External Library",   shape=component, fillcolor="#EEEEEE", fontsize=8];
+        leg_solid    [label="solid = primary call",    shape=plaintext, fillcolor=white, fontsize=8];
+        leg_dashed   [label="dashed = optional / hook", shape=plaintext, fillcolor=white, fontsize=8];
+
+        leg_browser -> leg_daemon  [style=invis];
+        leg_daemon  -> leg_plugin  [style=invis];
+        leg_plugin  -> leg_state   [style=invis];
+        leg_state   -> leg_event   [style=invis];
+        leg_event   -> leg_disk    [style=invis];
+        leg_disk    -> leg_ext     [style=invis];
+        leg_ext     -> leg_solid   [style=invis];
+        leg_solid   -> leg_dashed  [style=invis];
+    }
+
+    // ===================================================================
+    // BROWSER / FRONTEND (external actor)
+    // ===================================================================
+    frontend_spa [
+        label="Browser Frontend\n(index.html SPA)\nChat UI  Voice UI  History\nSSE EventSource subscriber",
+        shape=note,
+        fillcolor="#E3F2FD",
+        color="#1565C0"
+    ];
+
+    // ===================================================================
+    // AMPLIFIERD DAEMON LAYER
+    // ===================================================================
+    subgraph cluster_daemon {
+        label="amplifierd Daemon";
+        style=filled;
+        fillcolor="#FFEBEE";
+        color="#C62828";
+        fontcolor="#C62828";
+
+        amplifierd_host [
+            label="amplifierd Host\n(FastAPI app factory)\nPlugin discovery via\nimportlib.metadata entry-points",
+            fillcolor="#FFCDD2",
+            color="#C62828"
+        ];
+
+        daemon_routes [
+            label="Daemon API Routes\n(/sessions/*  ~30 endpoints)\nCRUD  execute  fork  spawn\nRFC-7807 ProblemDetail errors",
+            fillcolor="#EF9A9A",
+            color="#C62828"
+        ];
+
+        bundle_registry [
+            label="BundleRegistry\nBundle loading + prep\nAgent listing\nbundles_ready gate (asyncio.Event)",
+            fillcolor="#FFCDD2",
+            color="#C62828"
+        ];
+    }
+
+    // ===================================================================
+    // CHAT PLUGIN LAYER
+    // ===================================================================
+    subgraph cluster_plugin {
+        label="chat_plugin  (Plugin Package)";
+        style=filled;
+        fillcolor="#E8F5E9";
+        color="#2E7D32";
+        fontcolor="#2E7D32";
+
+        chat_plugin_router [
+            label="Plugin Router\ncreate_router(state)\nPlugin contract entry point\n9 sub-routers composed at startup",
+            fillcolor="#A5D6A7",
+            color="#1B5E20",
+            penwidth=2
+        ];
+
+        plugin_routes [
+            label="Plugin API Routes\n(/chat/*  ~25 endpoints)\nHistory  Pins  Fork (disk)\nShell  Feedback  Static SPA",
+            fillcolor="#C8E6C9",
+            color="#2E7D32"
+        ];
+
+        command_processor [
+            label="CommandProcessor\n16 slash commands\n/fork  /mode  /tools  /rename\n/agents  /voice  /clear  /status",
+            fillcolor="#C8E6C9",
+            color="#2E7D32"
+        ];
+
+        voice_subsystem [
+            label="Voice Subsystem  (optional)\nSTT: whisper.cpp / pywhispercpp\nTTS: edge-tts (Microsoft)\n7 endpoints  STT_MODELS allowlist",
+            fillcolor="#DCEDC8",
+            color="#388E3C",
+            style="filled,rounded,dashed"
+        ];
+    }
+
+    // ===================================================================
+    // CORE STATE  (amplifierd/state/)
+    // ===================================================================
+    subgraph cluster_state {
+        label="Core State  (amplifierd/state/)";
+        style=filled;
+        fillcolor="#E8EAF6";
+        color="#3949AB";
+        fontcolor="#3949AB";
+
+        session_manager [
+            label="SessionManager\nCentral session registry\ncreate  resume  destroy  list\nresolve_session_dir  index",
+            fillcolor="#9FA8DA",
+            color="#3949AB"
+        ];
+
+        session_handle [
+            label="SessionHandle\nPer-session wrapper\nasyncio.Lock execution serialization\nStatus FSM  children  cancel",
+            fillcolor="#C5CAE9",
+            color="#3949AB"
+        ];
+
+        event_bus [
+            label="EventBus\nSSE pub/sub tree\npublish (sync non-blocking)\nsubscribe (async generator)\nchild propagation  drop-oldest@10K",
+            shape=hexagon,
+            fillcolor="#7986CB",
+            color="#283593",
+            fontcolor="white"
+        ];
+    }
+
+    // ===================================================================
+    // PERSISTENCE LAYER
+    // ===================================================================
+    subgraph cluster_persistence {
+        label="Persistence Layer";
+        style=filled;
+        fillcolor="#FFF8E1";
+        color="#E65100";
+        fontcolor="#E65100";
+
+        persistence_hooks [
+            label="Persistence Hooks\nTranscriptSaveHook  (tool:post)\nMetadataSaveHook  (orchestrator:complete)\natomic tmp+rename via asyncio.to_thread",
+            shape=hexagon,
+            fillcolor="#FFCC80",
+            color="#E65100"
+        ];
+
+        disk_storage [
+            label="Disk Storage\nprojects/{slug}/sessions/{id}/\n  transcript.jsonl  (full rewrite)\n  metadata.json     (merge-write)\n  session-info.json (write-once)\n  index.json        (project index)",
+            shape=cylinder,
+            fillcolor="#FFE0B2",
+            color="#BF360C",
+            style=filled
+        ];
+    }
+
+    // ===================================================================
+    // EXTERNAL CORE LIBRARIES
+    // ===================================================================
+    subgraph cluster_external {
+        label="External Libraries  (graceful degradation via try/except)";
+        style=dashed;
+        color="#9E9E9E";
+        fontcolor="#757575";
+
+        amplifier_core [
+            label="amplifier_core\nAmplifierSession\nCoordinator  (hooks  context  tools)\nHookResult  ALL_EVENTS",
+            shape=component,
+            fillcolor="#EEEEEE",
+            color="#9E9E9E"
+        ];
+
+        amplifier_foundation [
+            label="amplifier_foundation\nfork_session  (disk-based)\nfork_session_in_memory\nsanitize_message  write_with_backup\nget_turn_boundaries  inject_providers",
+            shape=component,
+            fillcolor="#EEEEEE",
+            color="#9E9E9E"
+        ];
+    }
+
+    // ===================================================================
+    // EDGES — Plugin Discovery & State Injection
+    // ===================================================================
+    amplifierd_host -> chat_plugin_router [
+        label="discovers + calls\ncreate_router(state)\n[session_manager, event_bus,\nbundle_registry, projects_dir]",
+        color="#C62828",
+        penwidth=2
+    ];
+    amplifierd_host -> daemon_routes [label="mounts\n/sessions router", color="#C62828"];
+    amplifierd_host -> bundle_registry [label="creates", color="#C62828"];
+
+    // ===================================================================
+    // EDGES — Frontend to APIs
+    // ===================================================================
+    frontend_spa -> plugin_routes [
+        label="/chat/*\n(history, pins, fork,\nshell, feedback, SPA)",
+        color="#1565C0"
+    ];
+    frontend_spa -> daemon_routes [
+        label="/sessions/*\n(create, execute/stream,\nresume, cancel, fork)",
+        color="#1565C0",
+        penwidth=2
+    ];
+    frontend_spa -> event_bus [
+        label="SSE subscribe\nGET /sessions/{id}/events",
+        color="#1565C0",
+        style=bold,
+        lhead=cluster_state
+    ];
+
+    // ===================================================================
+    // EDGES — Plugin internal wiring
+    // ===================================================================
+    chat_plugin_router -> plugin_routes [
+        label="composes\nsub-routers",
+        color="#2E7D32"
+    ];
+    chat_plugin_router -> command_processor [label="creates", color="#2E7D32"];
+    chat_plugin_router -> voice_subsystem [
+        label="mounts (optional)",
+        style=dashed,
+        color="#388E3C"
+    ];
+
+    plugin_routes -> command_processor [
+        label="POST /chat/command\ndispatches slash cmds",
+        style=dashed,
+        color="#2E7D32"
+    ];
+    plugin_routes -> session_manager [
+        label="session ops\n(fork-preview, shell,\nhistory scan)",
+        color="#2E7D32"
+    ];
+    plugin_routes -> disk_storage [
+        label="scan + read\n(history, search,\npins, transcript)",
+        style=dashed,
+        color="#E65100",
+        lhead=cluster_persistence
+    ];
+    plugin_routes -> amplifier_foundation [
+        label="fork_session\n(disk-based)",
+        style=dashed,
+        color="#757575",
+        lhead=cluster_external
+    ];
+    command_processor -> session_manager [
+        label="get session  status\nclear  mode  tools\n(deep coordinator access)",
+        style=dashed,
+        color="#2E7D32"
+    ];
+
+    // ===================================================================
+    // EDGES — Daemon routes to state
+    // ===================================================================
+    daemon_routes -> session_manager [
+        label="CRUD  execute\nfork  spawn agents\ncreate / resume / destroy",
+        color="#C62828",
+        penwidth=2
+    ];
+    daemon_routes -> bundle_registry [
+        label="resolve bundle\nagent listing\nbundles_ready gate",
+        color="#C62828"
+    ];
+    daemon_routes -> amplifier_foundation [
+        label="fork_session_in_memory\nget_turn_boundaries",
+        style=dashed,
+        color="#757575"
+    ];
+
+    // ===================================================================
+    // EDGES — Core state internals
+    // ===================================================================
+    session_manager -> session_handle [
+        label="creates / owns\ndict[id to handle]",
+        color="#3949AB"
+    ];
+    session_manager -> event_bus [
+        label="wires events\nper handle",
+        style=dashed,
+        color="#3949AB"
+    ];
+    session_manager -> bundle_registry [
+        label="load + inject\nproviders  prepare",
+        color="#3949AB"
+    ];
+    session_manager -> amplifier_core [
+        label="AmplifierSession\ncreate / resume",
+        color="#3949AB",
+        lhead=cluster_external
+    ];
+    session_handle -> event_bus [
+        label="publish\nALL_EVENTS\n+ delegate events",
+        color="#3949AB"
+    ];
+    session_handle -> amplifier_core [
+        label="Coordinator\nhooks  context  tools",
+        style=dashed,
+        color="#757575"
+    ];
+
+    // ===================================================================
+    // EDGES — Persistence wiring
+    // ===================================================================
+    session_manager -> persistence_hooks [
+        label="register on\ncreate + resume",
+        style=dashed,
+        color="#E65100",
+        lhead=cluster_persistence
+    ];
+    persistence_hooks -> disk_storage [
+        label="atomic write\n(tmp + rename)",
+        color="#E65100"
+    ];
+    persistence_hooks -> amplifier_foundation [
+        label="sanitize_message\nwrite_with_backup",
+        style=dashed,
+        color="#757575"
+    ];
+
+    // ===================================================================
+    // EDGES — EventBus to Frontend (SSE stream)
+    // ===================================================================
+    event_bus -> frontend_spa [
+        label="SSE stream\nkernel + orchestrator events",
+        color="#3949AB",
+        style=bold
+    ];
+
+    // ===================================================================
+    // EDGES — Voice subsystem storage
+    // ===================================================================
+    voice_subsystem -> disk_storage [
+        label="ggml model files\nvoice-settings.json\n(atomic writes)",
+        style=dashed,
+        color="#388E3C"
+    ];
+}

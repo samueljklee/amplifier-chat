@@ -2,7 +2,7 @@
 name = "amplifier-chat"
 version = "0.1.1"
 requires-python = ">=3.12"
-description = "A chat UI that can be used as plugin in amplifier-distro or standalone. They both use amplifierd. Adds a browser-based conversational interface for creating and managing Amplifier sessions."
+description = "Browser-based conversational interface for Amplifier sessions, with optional voice support. Runs standalone or as an amplifierd plugin."
 dependencies = [
     "fastapi>=0.115",
     "httpx>=0.27",
